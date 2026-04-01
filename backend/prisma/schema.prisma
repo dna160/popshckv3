@@ -1,0 +1,42 @@
+// Prisma schema for Synthetic Newsroom POC
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Article {
+  id            String   @id @default(cuid())
+  title         String
+  pillar        String
+  sourceUrl     String
+  status        String   @default("PROCESSING") // GREEN, YELLOW, RED, PROCESSING, FAILED, PUBLISHED
+  revisionCount Int      @default(0)
+  content       String?
+  contentHtml   String?
+  images        String?  // JSON array of {url, alt, isFeatured}
+  editorNotes   String?
+  wpPostId      Int?
+  wpPostUrl     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model ProcessedUrl {
+  id        String   @id @default(cuid())
+  url       String   @unique
+  createdAt DateTime @default(now())
+}
+
+model PipelineRun {
+  id                String    @id @default(cuid())
+  status            String    // RUNNING, COMPLETED, FAILED
+  articlesProcessed Int       @default(0)
+  startedAt         DateTime  @default(now())
+  completedAt       DateTime?
+  logs              String?   // JSON array of PipelineLogEntry
+}

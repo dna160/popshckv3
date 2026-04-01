@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    background-color: #0D1117;
+    color: #E6EDF3;
+  }
+
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    background-color: #0D1117;
+    color: #E6EDF3;
+    min-height: 100vh;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #161B22;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #30363D;
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #8B949E;
+  }
+}
+
+@layer components {
+  .status-badge {
+    @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium font-mono uppercase tracking-wider;
+  }
+
+  .card {
+    @apply bg-newsroom-surface border border-newsroom-border rounded-lg;
+  }
+
+  .btn {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-all duration-150 cursor-pointer;
+  }
+
+  .btn-primary {
+    @apply btn bg-newsroom-blue text-newsroom-bg hover:bg-blue-400 active:scale-95;
+  }
+
+  .btn-danger {
+    @apply btn bg-newsroom-red/20 text-newsroom-red border border-newsroom-red/30 hover:bg-newsroom-red/30 active:scale-95;
+  }
+
+  .btn-ghost {
+    @apply btn bg-transparent text-newsroom-subtle border border-newsroom-border hover:bg-newsroom-muted hover:text-newsroom-text active:scale-95;
+  }
+
+  .section-title {
+    @apply text-xs font-mono uppercase tracking-widest text-newsroom-subtle;
+  }
+}
+
+/* Pulse animation for PROCESSING status */
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.processing-pulse {
+  animation: status-pulse 2s ease-in-out infinite;
+}
+
+/* Pipeline log scrolling */
+.log-container {
+  scroll-behavior: smooth;
+}

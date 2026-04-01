@@ -1,0 +1,20 @@
+{
+  "name": "synthetic-newsroom-poc",
+  "version": "1.0.0",
+  "description": "Synthetic Newsroom POC — 4-agent pipeline with React dashboard",
+  "private": true,
+  "scripts": {
+    "install:all": "npm install && npm install --prefix backend && npm install --prefix frontend",
+    "setup": "npm run install:all && npm run db:setup",
+    "db:setup": "cd backend && npx prisma generate && npx prisma db push",
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "pipeline:run": "cd backend && npm run pipeline:run",
+    "build:backend": "cd backend && npm run build",
+    "build:frontend": "cd frontend && npm run build"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
