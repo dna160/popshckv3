@@ -57,6 +57,8 @@ export interface PipelineLogEntry {
   message: string;
   agent?: string;
   articleId?: string;
+  reasoning?: string;
+  fallback_taken?: string;
 }
 
 export interface PipelineRun {

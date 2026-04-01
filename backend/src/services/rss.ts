@@ -16,26 +16,38 @@ export interface RssItem {
   pillar: Pillar;
 }
 
+/**
+ * Priority Japanese RSS feeds as required by the PRD.
+ * These are fetched for ALL pillars — the Scout's LLM triage assigns each
+ * item to the correct pillar based on content relevance.
+ */
+export const PRIORITY_FEEDS: string[] = [
+  'http://www.famitsu.com/rss/fcom_all.rdf',          // Famitsu — gaming, anime, manga
+  'https://www.4gamer.net/rss/index.xml',             // 4Gamer — gaming
+  'https://hobby.dengeki.com/feed/',                  // Dengeki Hobby — toys/collectibles
+  'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) — anime, manga, infotainment
+  'http://mantan-web.jp/index.rss',                   // Mantan Web — infotainment/entertainment
+];
+
+/**
+ * Pillar-specific fallback feeds used only when priority feeds yield
+ * insufficient candidates for a given pillar.
+ */
 export const RSS_FEEDS: Record<Pillar, string[]> = {
   anime: [
     'https://www.animenewsnetwork.com/all/rss.xml',
-    'https://feeds.feedburner.com/crunchyroll/animenews',
   ],
   gaming: [
     'https://www.siliconera.com/feed/',
-    'https://nintendoeverything.com/feed/',
   ],
   infotainment: [
-    'https://www.tokyoreporter.com/feed/',
     'https://soranews24.com/feed/',
   ],
   manga: [
-    'https://www.cbr.com/tag/manga/feed/',
     'https://animecorner.me/category/manga/feed/',
   ],
   toys: [
     'https://www.toyark.com/feed/',
-    'https://www.figures.com/news/feed/',
   ],
 };
 
@@ -62,18 +74,24 @@ export async function fetchFeed(url: string, pillar: Pillar): Promise<RssItem[]>
 }
 
 /**
- * Fetch all feeds for a given pillar, returning combined deduplicated items.
+ * Fetch all feeds for a given pillar.
+ * Priority Japanese feeds are fetched first (shared across all pillars);
+ * pillar-specific fallback feeds are appended afterward.
+ * The Scout's LLM triage filters items to the correct pillar.
  */
 export async function fetchPillarFeeds(pillar: Pillar): Promise<RssItem[]> {
-  const feeds = RSS_FEEDS[pillar];
-  const results = await Promise.allSettled(
-    feeds.map((url) => fetchFeed(url, pillar))
+  const priorityResults = await Promise.allSettled(
+    PRIORITY_FEEDS.map((url) => fetchFeed(url, pillar))
+  );
+  const fallbackResults = await Promise.allSettled(
+    RSS_FEEDS[pillar].map((url) => fetchFeed(url, pillar))
   );
 
   const allItems: RssItem[] = [];
   const seenLinks = new Set<string>();
 
-  for (const result of results) {
+  // Priority feeds first
+  for (const result of [...priorityResults, ...fallbackResults]) {
     if (result.status === 'fulfilled') {
       for (const item of result.value) {
         if (!seenLinks.has(item.link)) {

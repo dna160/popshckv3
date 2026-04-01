@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { PipelineStatusData, DashboardStats } from '../types';
 import { PILLAR_LABELS, PILLARS } from '../types';
 import { triggerPipeline } from '../api';
@@ -65,14 +65,93 @@ function PillarBar({ pillar, count, total }: { pillar: string; count: number; to
   );
 }
 
+// ── Full-screen log modal ─────────────────────────────────────────────────────
+
+interface LogModalProps {
+  logs: LogLine[];
+  isRunning: boolean;
+  onClose: () => void;
+}
+
+const LogModal: React.FC<LogModalProps> = ({ logs, isRunning, onClose }) => {
+  const endRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [logs.length]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex flex-col bg-newsroom-bg/95 backdrop-blur-sm"
+      style={{ fontFamily: 'monospace' }}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between px-6 py-4 border-b border-newsroom-border shrink-0">
+        <div className="flex items-center gap-3">
+          <span className="text-sm font-semibold text-newsroom-text">Pipeline Logs</span>
+          {isRunning && (
+            <span className="text-xs text-newsroom-blue font-mono processing-pulse">● LIVE</span>
+          )}
+          <span className="text-xs text-newsroom-subtle font-mono">{logs.length} entries</span>
+        </div>
+        <button
+          onClick={onClose}
+          className="text-newsroom-subtle hover:text-newsroom-text text-lg leading-none"
+          aria-label="Close log viewer"
+        >
+          ✕
+        </button>
+      </div>
+
+      {/* Log body */}
+      <div className="flex-1 overflow-y-auto p-6 space-y-0.5">
+        {logs.length === 0 ? (
+          <p className="text-newsroom-subtle text-sm">No logs available.</p>
+        ) : (
+          logs.map((log, i) => (
+            <div
+              key={i}
+              className={`flex gap-3 py-1 px-2 rounded text-xs hover:bg-newsroom-muted/20 ${
+                log.level === 'error' ? 'text-newsroom-red' :
+                log.level === 'warn' ? 'text-newsroom-yellow' :
+                'text-newsroom-subtle'
+              }`}
+            >
+              <span className="text-newsroom-muted shrink-0 w-20">
+                {new Date(log.timestamp).toLocaleTimeString('en-US', { hour12: false })}
+              </span>
+              {log.agent && (
+                <span className={`shrink-0 w-24 font-bold ${
+                  log.agent === 'Scout' ? 'text-purple-400' :
+                  log.agent === 'Researcher' ? 'text-cyan-400' :
+                  log.agent === 'Copywriter' ? 'text-orange-400' :
+                  log.agent === 'Editor' ? 'text-pink-400' :
+                  'text-newsroom-blue'
+                }`}>
+                  [{log.agent}]
+                </span>
+              )}
+              <span className="text-newsroom-text break-all leading-relaxed">{log.message}</span>
+            </div>
+          ))
+        )}
+        <div ref={endRef} />
+      </div>
+    </div>
+  );
+};
+
+// ── Main component ────────────────────────────────────────────────────────────
+
 export const NewsroomFloor: React.FC<NewsroomFloorProps> = ({
   pipelineStatus,
   stats,
   onTriggerRefresh,
 }) => {
   const logsEndRef = useRef<HTMLDivElement>(null);
-  const [triggering, setTriggering] = React.useState(false);
-  const [triggerError, setTriggerError] = React.useState<string | null>(null);
+  const [triggering, setTriggering] = useState(false);
+  const [triggerError, setTriggerError] = useState<string | null>(null);
+  const [showLogModal, setShowLogModal] = useState(false);
 
   const isRunning = pipelineStatus?.isRunning ?? false;
   const currentRun = pipelineStatus?.currentRun;
@@ -222,13 +301,26 @@ export const NewsroomFloor: React.FC<NewsroomFloorProps> = ({
       <div className="card flex-1 flex flex-col min-h-0 overflow-hidden">
         <div className="px-3 py-2 border-b border-newsroom-border flex items-center justify-between">
           <p className="section-title">Pipeline Logs</p>
-          {isRunning && (
-            <span className="text-xs text-newsroom-blue font-mono processing-pulse">LIVE</span>
-          )}
+          <div className="flex items-center gap-2">
+            {isRunning && (
+              <span className="text-xs text-newsroom-blue font-mono processing-pulse">LIVE</span>
+            )}
+            <button
+              onClick={() => setShowLogModal(true)}
+              className="text-xs text-newsroom-subtle hover:text-newsroom-blue font-mono border border-newsroom-border hover:border-newsroom-blue/40 rounded px-2 py-0.5 transition-colors"
+              title="Expand logs to full screen"
+            >
+              Expand Logs ↗
+            </button>
+          </div>
         </div>
-        <div className="flex-1 overflow-y-auto log-container p-2 space-y-0.5 font-mono text-xs min-h-[200px]">
+        <div
+          className="flex-1 overflow-y-auto log-container p-2 space-y-0.5 font-mono text-xs min-h-[200px] cursor-pointer"
+          onClick={() => setShowLogModal(true)}
+          title="Click to expand logs"
+        >
           {logs.length === 0 ? (
-            <p className="text-newsroom-subtle p-2">No logs available.</p>
+            <p className="text-newsroom-subtle p-2">No logs available. Click to expand.</p>
           ) : (
             logs.map((log, i) => (
               <div
@@ -252,6 +344,15 @@ export const NewsroomFloor: React.FC<NewsroomFloorProps> = ({
           <div ref={logsEndRef} />
         </div>
       </div>
+
+      {/* Full-screen log modal */}
+      {showLogModal && (
+        <LogModal
+          logs={logs}
+          isRunning={isRunning}
+          onClose={() => setShowLogModal(false)}
+        />
+      )}
     </div>
   );
 };

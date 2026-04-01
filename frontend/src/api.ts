@@ -54,6 +54,13 @@ export async function discardArticle(id: string): Promise<{ id: string }> {
   return request(`/articles/${id}`, { method: 'DELETE' });
 }
 
+export async function updateArticleContent(id: string, content: string): Promise<Article> {
+  return request<Article>(`/articles/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ content }),
+  });
+}
+
 // ── Pipeline ──────────────────────────────────────────────────────────────────
 
 export async function getPipelineStatus(): Promise<PipelineStatusData> {

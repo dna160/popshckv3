@@ -159,6 +159,38 @@ app.post('/api/articles/:id/publish', async (req: Request, res: Response) => {
 });
 
 /**
+ * PATCH /api/articles/:id
+ * Update article content (used by human reviewer for RED articles)
+ */
+app.patch('/api/articles/:id', async (req: Request, res: Response) => {
+  try {
+    const article = await prisma.article.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!article) {
+      return res.status(404).json({ success: false, error: 'Article not found' });
+    }
+
+    const { content } = req.body as { content?: string };
+    if (typeof content !== 'string' || content.trim() === '') {
+      return res.status(400).json({ success: false, error: 'content is required' });
+    }
+
+    const contentHtml = await marked.parse(content);
+
+    const updated = await prisma.article.update({
+      where: { id: req.params.id },
+      data: { content, contentHtml },
+    });
+
+    res.json({ success: true, data: { ...updated, images: parseImages(updated.images) } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+/**
  * DELETE /api/articles/:id
  * Discard an article
  */
