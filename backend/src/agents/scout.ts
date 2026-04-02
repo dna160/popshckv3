@@ -1,12 +1,25 @@
 /**
  * Agent 1: RSS Feeder & Triage (The Scout)
  *
- * Responsibilities:
- * - Poll all priority RSS feeds (mixed-topic sources)
- * - Dynamically categorize each item into one of the 5 pillars
- * - Extract localization/translation notes for proper nouns
- * - Deduplicate against ProcessedUrl DB table
- * - Select exactly 2 articles per pillar (10 total per run)
+ * Implements the "Freshness & Parallel Scatter" algorithm:
+ *
+ *   Phase 1 — Concurrent Aggregation
+ *             All PRIORITY_FEEDS are fetched simultaneously via Promise.allSettled.
+ *             Every item is merged into a single global pool tagged with its source feed.
+ *
+ *   Phase 2 — Global Chronological Sort
+ *             Pool is sorted strictly by pubDate (newest first) so the absolute
+ *             freshest articles across ALL feeds surface first.
+ *
+ *   Phase 3 — Anti-Dominance Shuffle
+ *             The top FRESH_POOL_SIZE items are Fisher-Yates shuffled so that a
+ *             single high-volume feed cannot monopolise the triage queue.
+ *
+ *   Phase 4 — Parallel Batch Triage (Bucket Filling)
+ *             Items are evaluated in batches of BATCH_SIZE via Promise.all.
+ *             Results fill per-pillar buckets up to MAX_CANDIDATES_PER_PILLAR.
+ *             Processing stops as soon as every bucket is full or the pool
+ *             is exhausted.
  */
 
 import { PrismaClient } from '@prisma/client';
@@ -15,15 +28,17 @@ import { chat, parseJsonResponse } from '../services/llm';
 import type { Pillar, ScoutItem } from '../../../shared/types';
 import { PILLARS, PILLAR_LABELS } from '../../../shared/types';
 
-const TARGET_PER_PILLAR = 2;          // How many successes the pipeline needs per pillar
-const MAX_CANDIDATES_PER_PILLAR = 8;  // Max scout candidates to collect (includes replacements)
+const TARGET_PER_PILLAR      = 2;   // Pipeline success quota per pillar
+const MAX_CANDIDATES_PER_PILLAR = 8; // Scout collects extras as replacement pool
+const FRESH_POOL_SIZE        = 50;  // Top-N freshest items to shuffle
+const BATCH_SIZE             = 10;  // Parallel LLM calls per triage batch
 
 const PILLAR_FROM_LABEL: Record<string, Pillar> = {
-  'Japanese Anime': 'anime',
-  'Japanese Gaming': 'gaming',
-  'Japanese Infotainment': 'infotainment',
-  'Japanese Manga': 'manga',
-  'Japanese Toys/Collectibles': 'toys',
+  'Japanese Anime':            'anime',
+  'Japanese Gaming':           'gaming',
+  'Japanese Infotainment':     'infotainment',
+  'Japanese Manga':            'manga',
+  'Japanese Toys/Collectibles':'toys',
 };
 
 interface TriageResult {
@@ -31,6 +46,22 @@ interface TriageResult {
   pillar: Pillar;
   extracted_facts: string;
   translation_notes: string;
+}
+
+interface PoolItem {
+  title:   string;
+  link:    string;
+  summary: string;
+  pubDate?: string;
+}
+
+// ─── Fisher-Yates shuffle (in-place) ────────────────────────────────────────
+function shuffle<T>(arr: T[]): T[] {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
 }
 
 export class Scout {
@@ -42,30 +73,23 @@ export class Scout {
     this.log = log;
   }
 
-  /**
-   * Check if a URL has already been processed.
-   */
+  // ── DB helpers ─────────────────────────────────────────────────────────────
+
   private async isProcessed(url: string): Promise<boolean> {
     const existing = await this.prisma.processedUrl.findUnique({ where: { url } });
     return existing !== null;
   }
 
-  /**
-   * Mark a URL as processed to prevent re-processing.
-   */
   async markProcessed(url: string): Promise<void> {
     await this.prisma.processedUrl.upsert({
-      where: { url },
+      where:  { url },
       update: {},
       create: { url },
     });
   }
 
-  /**
-   * Triage a single RSS item using the Scout Agent prompt.
-   * Dynamically assigns pillar, extracts facts, and provides translation notes.
-   * Returns null if the item is REJECTED or unparseable.
-   */
+  // ── Phase 4 helper: triage a single item ───────────────────────────────────
+
   private async triageItem(title: string, summary: string): Promise<TriageResult | null> {
     const prompt = `You are the **Scout Agent** for a Japanese pop-culture newsroom. Your job is to analyze raw Japanese RSS feed items, extract the core facts, and provide accurate localization notes.
 
@@ -120,8 +144,8 @@ Respond ONLY with the JSON object.`;
       return {
         status: 'APPROVED',
         pillar,
-        extracted_facts: result.extracted_facts || '',
-        translation_notes: result.translation_notes || '',
+        extracted_facts:    result.extracted_facts    || '',
+        translation_notes:  result.translation_notes  || '',
       };
     } catch (err) {
       this.log(`[Scout] Triage failed for "${title}": ${(err as Error).message}`);
@@ -129,29 +153,33 @@ Respond ONLY with the JSON object.`;
     }
   }
 
-  /**
-   * Main Scout run: fetch all priority feeds, triage each item dynamically,
-   * and return up to ARTICLES_PER_PILLAR items per pillar.
-   *
-   * Accepts a set of rejected URLs from the Researcher to exclude on retry.
-   */
+  // ── Main run ───────────────────────────────────────────────────────────────
+
   async run(rejectedUrls: Set<string> = new Set()): Promise<ScoutItem[]> {
-    this.log('[Scout] Starting RSS triage run...');
+    this.log('[Scout] Starting Freshness & Parallel Scatter run...');
 
-    // Fetch all priority feeds once (all pillars share the same mixed-topic feeds)
-    const rawItems = await fetchPillarFeeds('anime');
+    // ── Phase 1: Concurrent aggregation ─────────────────────────────────────
+    this.log('[Scout] Phase 1: Fetching all feeds concurrently...');
+    const rawItems = await fetchPillarFeeds('anime'); // fetches all PRIORITY_FEEDS at once
 
-    // Filter out rejected and already-processed URLs
-    const candidates = rawItems.filter((item) => !rejectedUrls.has(item.link));
+    // ── Phase 2: Global chronological sort (freshest first) ─────────────────
+    this.log(`[Scout] Phase 2: Sorting ${rawItems.length} items by freshness...`);
+    const sorted = [...rawItems].sort((a, b) => {
+      const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
+      const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
+      return tb - ta; // descending — newest first
+    });
 
-    const unprocessed: typeof candidates = [];
-    for (const item of candidates) {
-      const processed = await this.isProcessed(item.link);
-      if (processed) {
+    // Remove rejected and already-processed URLs
+    const unprocessed: PoolItem[] = [];
+    for (const item of sorted) {
+      if (rejectedUrls.has(item.link)) continue;
+      const seen = await this.isProcessed(item.link);
+      if (seen) {
         this.log(`[Scout] Skipping already-processed: ${item.link}`);
-      } else {
-        unprocessed.push(item);
+        continue;
       }
+      unprocessed.push(item);
     }
 
     if (unprocessed.length === 0) {
@@ -159,58 +187,69 @@ Respond ONLY with the JSON object.`;
       return [];
     }
 
-    this.log(`[Scout] Triaging ${unprocessed.length} unprocessed items...`);
+    // ── Phase 3: Anti-dominance shuffle on top N freshest ───────────────────
+    this.log(`[Scout] Phase 3: Shuffling top ${FRESH_POOL_SIZE} freshest items...`);
+    const topFresh = unprocessed.slice(0, FRESH_POOL_SIZE);
+    const rest     = unprocessed.slice(FRESH_POOL_SIZE);
+    const pool     = [...shuffle(topFresh), ...rest]; // rest stays chronological as fallback
 
-    // Triage all items in parallel
-    const triaged = await Promise.all(
-      unprocessed.map(async (item) => {
-        const result = await this.triageItem(item.title, item.summary);
-        if (!result) {
-          this.log(`[Scout] Rejected: "${item.title}"`);
-          return null;
-        }
-        return { item, result };
-      })
-    );
+    // ── Phase 4: Parallel batch triage — fill per-pillar buckets ────────────
+    this.log('[Scout] Phase 4: Parallel LLM triage in batches...');
 
-    // Group by pillar, capped at ARTICLES_PER_PILLAR each
-    const byPillar: Record<Pillar, ScoutItem[]> = {
-      anime: [],
-      gaming: [],
-      infotainment: [],
-      manga: [],
-      toys: [],
+    const buckets: Record<Pillar, ScoutItem[]> = {
+      anime: [], gaming: [], infotainment: [], manga: [], toys: [],
     };
 
-    for (const entry of triaged) {
-      if (!entry) continue;
-      const { item, result } = entry;
-      const bucket = byPillar[result.pillar];
-      if (bucket.length < MAX_CANDIDATES_PER_PILLAR) {
-        bucket.push({
-          title: item.title,
-          link: item.link,
-          summary: item.summary,
-          pillar: result.pillar,
-          translationNotes: result.translation_notes,
-        });
+    const allFull = () =>
+      PILLARS.every((p) => buckets[p].length >= MAX_CANDIDATES_PER_PILLAR);
+
+    for (let i = 0; i < pool.length && !allFull(); i += BATCH_SIZE) {
+      const batch = pool.slice(i, i + BATCH_SIZE);
+
+      this.log(`[Scout] Triaging batch ${Math.floor(i / BATCH_SIZE) + 1} (${batch.length} items)...`);
+
+      // Evaluate entire batch in parallel
+      const results = await Promise.all(
+        batch.map((item) => this.triageItem(item.title, item.summary))
+      );
+
+      for (let j = 0; j < results.length; j++) {
+        const result = results[j];
+        const item   = batch[j];
+
+        if (!result) {
+          this.log(`[Scout] Rejected: "${item.title}"`);
+          continue;
+        }
+
+        const bucket = buckets[result.pillar];
+        if (bucket.length < MAX_CANDIDATES_PER_PILLAR) {
+          bucket.push({
+            title:            item.title,
+            link:             item.link,
+            summary:          item.summary,
+            pillar:           result.pillar,
+            translationNotes: result.translation_notes,
+          });
+          this.log(`[Scout] Accepted [${result.pillar}] (${bucket.length}/${MAX_CANDIDATES_PER_PILLAR}): "${item.title}"`);
+        }
       }
     }
 
+    // Flatten buckets and log summary
     const selected: ScoutItem[] = [];
     for (const pillar of PILLARS) {
-      for (const item of byPillar[pillar]) {
-        this.log(`[Scout] Selected: "${item.title}" [${pillar}]`);
+      for (const item of buckets[pillar]) {
         selected.push(item);
       }
-      if (byPillar[pillar].length < TARGET_PER_PILLAR) {
+      if (buckets[pillar].length < TARGET_PER_PILLAR) {
         this.log(
-          `[Scout] Warning: Only found ${byPillar[pillar].length}/${TARGET_PER_PILLAR} items for ${PILLAR_LABELS[pillar]}`
+          `[Scout] Warning: Only ${buckets[pillar].length}/${TARGET_PER_PILLAR} candidates for ${PILLAR_LABELS[pillar]}`
         );
       }
     }
 
-    this.log(`[Scout] Triage complete. Found ${selected.length} candidate articles.`);
+    this.log(`[Scout] Triage complete. ${selected.length} candidates across ${PILLARS.length} pillars.`);
     return selected;
   }
 }
