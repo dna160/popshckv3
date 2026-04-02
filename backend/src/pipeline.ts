@@ -100,11 +100,21 @@ export class Pipeline {
   }
 
   /**
+   * Extract the first H1 headline from Markdown content.
+   * Returns null if no H1 is found.
+   */
+  private extractH1(markdown: string): string | null {
+    const match = markdown.match(/^#\s+(.+)$/m);
+    return match ? match[1].trim() : null;
+  }
+
+  /**
    * Update article status and content in the database.
    */
   private async updateArticle(
     id: string,
     data: {
+      title?: string;
       status?: string;
       content?: string;
       contentHtml?: string;
@@ -130,6 +140,7 @@ export class Pipeline {
     let revisionCount = 0;
     let lastEditorFeedback = '';
     let currentImages = item.images;
+    let indonesianTitle: string | null = null;
 
     for (let attempt = 0; attempt <= MAX_REVISION_LOOPS; attempt++) {
       // Check abort before each revision attempt
@@ -179,9 +190,17 @@ export class Pipeline {
         continue;
       }
 
+      // Extract Indonesian headline from Copywriter's H1 and update DB title
+      const extractedTitle = this.extractH1(draft.content);
+      if (extractedTitle) {
+        indonesianTitle = extractedTitle;
+        this.addLog(`[Copywriter] Indonesian headline: "${indonesianTitle}"`, 'info', 'Copywriter');
+      }
+
       // Save draft to DB
       const contentHtml = await marked.parse(draft.content);
       await this.updateArticle(articleId, {
+        ...(indonesianTitle ? { title: indonesianTitle } : {}),
         content: draft.content,
         contentHtml,
         images: JSON.stringify(currentImages),
@@ -214,9 +233,10 @@ export class Pipeline {
           editorNotes: editorResult.feedback,
         });
 
-        // Auto-publish GREEN articles to WordPress
+        // Auto-publish GREEN articles to WordPress using Indonesian title
         if (status === 'GREEN') {
-          await this.tryPublishToWordPress(articleId, item.title, finalHtml, currentImages, item.pillar);
+          const publishTitle = indonesianTitle || item.title;
+          await this.tryPublishToWordPress(articleId, publishTitle, finalHtml, currentImages, item.pillar);
         }
 
         return status;

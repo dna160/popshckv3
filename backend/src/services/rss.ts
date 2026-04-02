@@ -17,16 +17,16 @@ export interface RssItem {
 }
 
 /**
- * Priority Japanese RSS feeds as required by the PRD.
+ * Priority Japanese RSS feeds.
  * These are fetched for ALL pillars — the Scout's LLM triage assigns each
  * item to the correct pillar based on content relevance.
  */
 export const PRIORITY_FEEDS: string[] = [
-  'http://www.famitsu.com/rss/fcom_all.rdf',          // Famitsu — gaming, anime, manga
+  'https://automaton-media.com/feed/',                // Automaton — gaming, anime, manga (replaces dead Famitsu)
   'https://www.4gamer.net/rss/index.xml',             // 4Gamer — gaming
   'https://hobby.dengeki.com/feed/',                  // Dengeki Hobby — toys/collectibles
   'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) — anime, manga, infotainment
-  'http://mantan-web.jp/index.rss',                   // Mantan Web — infotainment/entertainment
+  'https://news.denfaminicogamer.jp/feed',            // Denfami — gaming, manga, anime (replaces empty Mantan)
 ];
 
 /**
@@ -55,18 +55,60 @@ export const RSS_FEEDS: Record<Pillar, string[]> = {
  * Fetch and parse a single RSS feed URL.
  * Returns array of RssItems (may be empty on failure).
  */
+/**
+ * For Mastodon-proxy feeds (e.g. Natalie via chaosphere.hostdon.jp),
+ * items have no <title>. Extract a title and the real article URL from
+ * the HTML description instead.
+ */
+function extractFromMastodonDescription(
+  html: string,
+  fallbackLink: string
+): { title: string; link: string } {
+  // Strip HTML tags
+  const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  // Remove leading 【 #tag #tag 】 section
+  const cleaned = text.replace(/^【[^】]*】\s*/, '').trim();
+  // Find the first real article URL embedded in an <a href>
+  const urlMatch = html.match(/href="(https?:\/\/(?!chaosphere)[^"]+)"/);
+  const articleLink = urlMatch ? urlMatch[1] : fallbackLink;
+  // Title is everything before the URL at the end of the cleaned text
+  const title = cleaned.replace(/https?:\/\/\S+/g, '').trim() || cleaned.slice(0, 120);
+  return { title, link: articleLink };
+}
+
 export async function fetchFeed(url: string, pillar: Pillar): Promise<RssItem[]> {
   try {
     const feed = await parser.parseURL(url);
+    const isMastodonFeed = url.includes('hostdon.jp') || url.includes('mastodon');
+
     return (feed.items || [])
-      .filter((item) => item.title && item.link)
-      .map((item) => ({
-        title: item.title!.trim(),
-        link: item.link!.trim(),
-        summary: item.contentSnippet || item.summary || item.content || '',
-        pubDate: item.pubDate,
-        pillar,
-      }));
+      .filter((item) => item.link || item.guid)
+      .map((item) => {
+        const rawLink = (item.link || item.guid || '').trim();
+
+        // Mastodon-proxy items lack <title> — extract from description HTML
+        if (isMastodonFeed && !item.title) {
+          const html = item.content || item.summary || item['content:encoded'] || '';
+          const { title, link } = extractFromMastodonDescription(html, rawLink);
+          return {
+            title,
+            link,
+            summary: title,
+            pubDate: item.pubDate,
+            pillar,
+          };
+        }
+
+        if (!item.title) return null;
+        return {
+          title: item.title.trim(),
+          link: rawLink,
+          summary: item.contentSnippet || item.summary || item.content || '',
+          pubDate: item.pubDate,
+          pillar,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null && item.title.length > 0 && item.link.length > 0) as RssItem[];
   } catch (err) {
     console.warn(`[RSS] Failed to fetch ${url}:`, (err as Error).message);
     return [];
