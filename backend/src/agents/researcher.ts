@@ -87,10 +87,24 @@ Respond in JSON format:
 
     try {
       const raw = await chat([{ role: 'user', content: prompt }], { temperature: 0.3, maxTokens: 500 });
-      const result = parseJsonResponse<{ facts: string[] }>(raw);
-      return result.facts || [];
+
+      try {
+        const result = parseJsonResponse<{ facts: string[] }>(raw);
+        if (result && Array.isArray(result.facts) && result.facts.length > 0) {
+          return result.facts;
+        }
+        // Fallback if facts array is empty or missing
+        throw new Error('LLM returned empty or malformed facts array');
+      } catch (parseErr) {
+        // JSON parse failed or structure invalid — log and fall back to title + summary
+        this.log(
+          `[Researcher] Fact extraction JSON parse failed for "${item.title}": ${(parseErr as Error).message}. Using title + summary as fallback.`
+        );
+        return [item.title, item.summary.slice(0, 200)];
+      }
     } catch (err) {
-      this.log(`[Researcher] Fact extraction failed: ${(err as Error).message}`);
+      // LLM call itself failed (network, timeout, etc.)
+      this.log(`[Researcher] Fact extraction LLM call failed: ${(err as Error).message}`);
       return [item.title, item.summary.slice(0, 200)];
     }
   }
