@@ -201,9 +201,21 @@ Respond ONLY with the JSON object.`;
       return tb - ta; // descending — newest first
     });
 
+    // Age filter: discard items older than 7 days
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const fresh = sorted.filter((item) => {
+      if (!item.pubDate) return true; // no date → assume fresh
+      const age = new Date(item.pubDate).getTime();
+      return age >= cutoff;
+    });
+    const staleCount = sorted.length - fresh.length;
+    if (staleCount > 0) {
+      this.log(`[Scout] Age filter: dropped ${staleCount} items older than 7 days (${fresh.length} remain)`);
+    }
+
     // Remove rejected and already-processed URLs
     const unprocessed: PoolItem[] = [];
-    for (const item of sorted) {
+    for (const item of fresh) {
       if (rejectedUrls.has(item.link)) continue;
       const seen = await this.isProcessed(item.link);
       if (seen) {
