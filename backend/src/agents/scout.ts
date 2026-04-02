@@ -40,7 +40,7 @@
 import path from 'path';
 import fs   from 'fs/promises';
 import { PrismaClient } from '@prisma/client';
-import { fetchPillarFeeds } from '../services/rss';
+import { fetchFeed, RSS_FEEDS, PRIORITY_FEEDS } from '../services/rss';
 import { chat, parseJsonResponse } from '../services/llm';
 import type { Pillar, ScoutItem } from '../../../shared/types';
 import { PILLARS, PILLAR_LABELS } from '../../../shared/types';
@@ -49,10 +49,22 @@ import { PILLARS, PILLAR_LABELS } from '../../../shared/types';
 const TARGET_PER_PILLAR         = 10;
 const MAX_CANDIDATES_PER_PILLAR = 10;
 const FRESH_POOL_SIZE           = 150;
+const RETRY_POOL_SIZE           = 50;   // additional items fetched per retry round (from fallback feeds)
 const BATCH_SIZE                = 10;
 const AGE_LIMIT_DAYS            = 7;
 const AGE_RETRY_DAYS            = 14;
-const MAX_RETRY_ROUNDS          = 2;
+const MAX_RETRY_ROUNDS          = 3;
+
+/**
+ * Feeds scoring below this threshold when some buckets are full are considered
+ * "full-pillar dominant" and are demoted to a fallback tier.
+ *
+ * A score of 0 means the feed has ONLY ever produced content for full pillars.
+ * A score of 0.5 means the feed has no history (neutral — treated as preferred).
+ * Setting the threshold at 0.15 means a feed needs at least ~15% historical
+ * affinity for open pillars to stay in the preferred tier.
+ */
+const USEFUL_SCORE_THRESHOLD    = 0.15;
 
 const MEMORY_FILE = path.join(process.cwd(), 'data', 'feed-memory.json');
 
@@ -295,19 +307,71 @@ Respond ONLY with the JSON object.`;
     roundLabel: string
   ): Promise<void> {
     const allFull = () => PILLARS.every((p) => buckets[p].length >= MAX_CANDIDATES_PER_PILLAR);
-    const remaining = [...pool];
+    // `let` because we reassign via .filter() when pulling the batch
+    let remaining = [...pool];
     let batchNum = 0;
 
     while (remaining.length > 0 && !allFull()) {
-      // Re-sort by empirical need score before each batch
-      remaining.sort((a, b) => memory.score(b.sourceFeed, buckets) - memory.score(a.sourceFeed, buckets));
+      const fullPillars = PILLARS.filter((p) => buckets[p].length >= MAX_CANDIDATES_PER_PILLAR);
+      const openPillars = PILLARS.filter((p) => buckets[p].length < MAX_CANDIDATES_PER_PILLAR);
 
-      const batch = remaining.splice(0, BATCH_SIZE);
+      // ── Bucket-aware batch construction ──────────────────────────────────
+      //
+      // Score every remaining item given the CURRENT bucket state, then split
+      // into two tiers:
+      //
+      //   Preferred — feeds scoring ≥ USEFUL_SCORE_THRESHOLD:
+      //     These feeds have meaningful historical affinity for at least one
+      //     open pillar. Use them first.
+      //
+      //   Fallback  — feeds scoring < USEFUL_SCORE_THRESHOLD:
+      //     These feeds predominantly produce content for pillar(s) that are
+      //     already full. Only pulled into the batch when the preferred pool
+      //     cannot fill the full BATCH_SIZE.
+      //
+      // This guarantees that once gaming (for example) is full, the Scout
+      // exhausts all feeds with non-gaming affinity before touching 4Gamer
+      // or other gaming-heavy sources.  Even then those sources may contain
+      // the occasional off-pillar article, so they are never skipped entirely.
+      const scored = remaining.map((item) => ({
+        item,
+        score: memory.score(item.sourceFeed, buckets),
+      }));
+
+      const preferred = scored
+        .filter((s) => s.score >= USEFUL_SCORE_THRESHOLD)
+        .sort((a, b) => b.score - a.score);
+
+      const fallback = scored
+        .filter((s) => s.score < USEFUL_SCORE_THRESHOLD)
+        .sort((a, b) => b.score - a.score);
+
+      const batchScored = [...preferred, ...fallback].slice(0, BATCH_SIZE);
+      const batch       = batchScored.map((s) => s.item);
+
+      // Remove the selected items from the remaining pool
+      const batchLinks = new Set(batch.map((i) => i.link));
+      remaining = remaining.filter((i) => !batchLinks.has(i.link));
+
       batchNum++;
 
-      this.log(
-        `[Scout] ${roundLabel} — Batch ${batchNum} (${batch.length} items, ${remaining.length} remaining)`
-      );
+      // ── Batch composition log ─────────────────────────────────────────────
+      const prefCount = batchScored.filter((s) => s.score >= USEFUL_SCORE_THRESHOLD).length;
+      const fbCount   = batchScored.length - prefCount;
+
+      if (fullPillars.length > 0) {
+        const tierNote = fbCount > 0
+          ? `${prefCount} preferred + ${fbCount} fallback (full: [${fullPillars.join(', ')}])`
+          : `${prefCount} preferred`;
+        this.log(
+          `[Scout] ${roundLabel} — Batch ${batchNum} (${batch.length} items): ${tierNote}` +
+          ` | open: [${openPillars.join(', ')}] | ${remaining.length} remaining`
+        );
+      } else {
+        this.log(
+          `[Scout] ${roundLabel} — Batch ${batchNum} (${batch.length} items, ${remaining.length} remaining)`
+        );
+      }
 
       // Mark all batch items as triaged BEFORE the LLM call so retries
       // never re-evaluate the same URL regardless of outcome
@@ -367,21 +431,57 @@ Respond ONLY with the JSON object.`;
 
   // ── Build deduplicated pool ───────────────────────────────────────────────────
 
+  /**
+   * Fetch `feedUrls`, deduplicate, age-filter, remove already-processed/triaged
+   * items, and return up to `maxItems` candidates (freshest-first, shuffled).
+   *
+   * @param feedUrls    - Which RSS feeds to fetch (PRIORITY on Round 1,
+   *                      fallback RSS_FEEDS on Round 2+)
+   * @param ageDays     - Maximum article age in days
+   * @param rejectedUrls - URLs the caller has explicitly ruled out
+   * @param triagedUrls  - URLs already sent to the LLM this run (skip them)
+   * @param maxItems    - Cap on how many items to return
+   */
   private async buildPool(
-    ageDays: number,
+    feedUrls:     string[],
+    ageDays:      number,
     rejectedUrls: Set<string>,
-    triagedUrls: Set<string>  // only skip items already sent to the LLM this run
+    triagedUrls:  Set<string>,
+    maxItems:     number = FRESH_POOL_SIZE
   ): Promise<PoolItem[]> {
-    const rawItems = await fetchPillarFeeds('anime');
+    // Fetch all feeds concurrently; tag each item with 'anime' as a dummy pillar
+    // (the Scout's LLM triage assigns the real pillar — this field is unused here)
+    const feedResults = await Promise.allSettled(
+      feedUrls.map((url) => fetchFeed(url, 'anime'))
+    );
 
-    const sorted = [...rawItems].sort((a, b) => {
+    const rawItems: PoolItem[] = [];
+    const seenLinks = new Set<string>();
+    for (const result of feedResults) {
+      if (result.status === 'fulfilled') {
+        for (const item of result.value) {
+          if (!seenLinks.has(item.link)) {
+            seenLinks.add(item.link);
+            rawItems.push({
+              title:      item.title,
+              link:       item.link,
+              summary:    item.summary,
+              pubDate:    item.pubDate,
+              sourceFeed: item.sourceFeed,
+            });
+          }
+        }
+      }
+    }
+
+    const sorted = rawItems.sort((a, b) => {
       const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
       const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
       return tb - ta;
     });
 
     const cutoff = Date.now() - ageDays * 24 * 60 * 60 * 1000;
-    const aged = sorted.filter((item) =>
+    const aged   = sorted.filter((item) =>
       !item.pubDate || new Date(item.pubDate).getTime() >= cutoff
     );
 
@@ -393,21 +493,64 @@ Respond ONLY with the JSON object.`;
     const unprocessed: PoolItem[] = [];
     for (const item of aged) {
       if (rejectedUrls.has(item.link)) continue;
-      if (triagedUrls.has(item.link)) continue; // already evaluated this run — skip
+      if (triagedUrls.has(item.link))  continue; // already evaluated this run — skip
       const seen = await this.isProcessed(item.link);
       if (seen) continue;
-      unprocessed.push({
-        title:      item.title,
-        link:       item.link,
-        summary:    item.summary,
-        pubDate:    item.pubDate,
-        sourceFeed: item.sourceFeed,
-      });
+      unprocessed.push(item);
     }
 
-    const topFresh = unprocessed.slice(0, FRESH_POOL_SIZE);
-    const rest     = unprocessed.slice(FRESH_POOL_SIZE);
+    // Shuffle the freshest slice; leave the remainder in date order
+    const topFresh = unprocessed.slice(0, maxItems);
+    const rest     = unprocessed.slice(maxItems);
     return [...shuffle(topFresh), ...rest];
+  }
+
+  /**
+   * Build a deduplicated, bucket-aware list of fallback feed URLs.
+   *
+   * Feeds are sorted by their FeedMemory usefulness score given the current
+   * bucket state — feeds historically strong in already-full pillars are
+   * pushed to the back (or skipped if scoring zero).  Feeds with no history
+   * score 0.5 (neutral) and are included near the front.
+   *
+   * This means if gaming is full, siliconera.com (100% gaming history) will
+   * rank last among fallback sources, while animenewsnetwork.com (anime) and
+   * soranews24.com (infotainment) will be fetched first.
+   *
+   * @param buckets - Current pillar fill counts (used for score calculation)
+   * @param memory  - Empirical feed memory
+   */
+  private fallbackFeedUrls(
+    buckets: Record<Pillar, ScoutItem[]>,
+    memory:  FeedMemory
+  ): string[] {
+    const seen = new Set<string>();
+    const entries: { url: string; score: number }[] = [];
+
+    for (const pillar of PILLARS) {
+      for (const url of RSS_FEEDS[pillar as Pillar]) {
+        if (!seen.has(url)) {
+          seen.add(url);
+          let domain = url;
+          try { domain = new URL(url).hostname; } catch { /* keep raw */ }
+          entries.push({ url, score: memory.score(domain, buckets) });
+        }
+      }
+    }
+
+    // Sort descending by usefulness — feeds useful for open pillars come first
+    entries.sort((a, b) => b.score - a.score);
+
+    this.log(
+      `[Scout] Fallback feed ranking: ` +
+      entries.map((e) => {
+        let domain = e.url;
+        try { domain = new URL(e.url).hostname; } catch { /* keep raw */ }
+        return `${domain}(${e.score.toFixed(2)})`;
+      }).join(', ')
+    );
+
+    return entries.map((e) => e.url);
   }
 
   // ── Main run ─────────────────────────────────────────────────────────────────
@@ -431,12 +574,17 @@ Respond ONLY with the JSON object.`;
     // are NOT marked, so they remain available for the next round.
     const triagedUrls = new Set<string>();
 
-    // ── Initial pass ──────────────────────────────────────────────────────────
-    this.log(`[Scout] Building pool (${AGE_LIMIT_DAYS}-day window)...`);
-    const initialPool = await this.buildPool(AGE_LIMIT_DAYS, rejectedUrls, triagedUrls);
+    // ── Initial pass (Round 1): PRIORITY_FEEDS only ───────────────────────────
+    this.log(
+      `[Scout] Building initial pool from ${PRIORITY_FEEDS.length} priority feeds ` +
+      `(${AGE_LIMIT_DAYS}-day window, cap: ${FRESH_POOL_SIZE})...`
+    );
+    const initialPool = await this.buildPool(
+      PRIORITY_FEEDS, AGE_LIMIT_DAYS, rejectedUrls, triagedUrls, FRESH_POOL_SIZE
+    );
 
     if (initialPool.length === 0) {
-      this.log('[Scout] No new items found in feeds.');
+      this.log('[Scout] No new items found in priority feeds.');
       await memory.save(this.log);
       return [];
     }
@@ -444,13 +592,22 @@ Respond ONLY with the JSON object.`;
     this.log(`[Scout] Pool: ${initialPool.length} items. Starting triage...`);
     await this.triagePool(initialPool, buckets, memory, triagedUrls, 'Round 1');
 
-    // ── Retry loop: keep going until quota met or feeds truly exhausted ───────
-    // Stops only when:
+    // ── Retry loop (Round 2+): FALLBACK feeds, 50 new items per round ─────────
+    //
+    // Once PRIORITY_FEEDS are exhausted (all triaged items tracked in
+    // triagedUrls), retry rounds fetch from RSS_FEEDS — the pillar-specific
+    // fallback feeds that were NOT touched in Round 1.
+    //
+    // Each retry round pulls RETRY_POOL_SIZE (50) fresh items from those
+    // feeds, ensuring the Scout always advances into genuinely new content
+    // rather than re-scanning an already-exhausted pool.
+    //
+    // Stops when:
     //   (a) all pillar buckets reach TARGET_PER_PILLAR, OR
-    //   (b) MAX_EMPTY_ROUNDS consecutive fetches yield zero new items
+    //   (b) MAX_EMPTY_ROUNDS consecutive fallback fetches yield zero new items
     const MAX_EMPTY_ROUNDS = 3;
-    let emptyRounds  = 0;
-    let retryRound   = 1;
+    let emptyRounds        = 0;
+    let retryRound         = 1;
 
     while (true) {
       const under = PILLARS.filter((p) => buckets[p].length < TARGET_PER_PILLAR);
@@ -459,29 +616,45 @@ Respond ONLY with the JSON object.`;
       const missing = under
         .map((p) => `${PILLAR_LABELS[p]}(${TARGET_PER_PILLAR - buckets[p].length} needed)`)
         .join(', ');
-      this.log(`[Scout] ⚠ Underquota: ${missing} — re-fetching feeds (round ${retryRound})...`);
 
-      // Expand age window after first retry to widen the candidate pool
+      // Expand age window after the first retry to widen the candidate pool
       const ageDays = retryRound === 1 ? AGE_LIMIT_DAYS : AGE_RETRY_DAYS;
-      const retryPool = await this.buildPool(ageDays, rejectedUrls, triagedUrls);
+
+      // Re-rank fallback feeds each round based on current bucket state
+      const fallbackUrls = this.fallbackFeedUrls(buckets, memory);
+
+      this.log(
+        `[Scout] ⚠ Underquota: ${missing} — fetching ${RETRY_POOL_SIZE} new items from ` +
+        `${fallbackUrls.length} fallback feeds (round ${retryRound + 1}, ${ageDays}-day window)...`
+      );
+
+      const retryPool = await this.buildPool(
+        fallbackUrls, ageDays, rejectedUrls, triagedUrls, RETRY_POOL_SIZE
+      );
 
       if (retryPool.length === 0) {
         emptyRounds++;
         this.log(
-          `[Scout] Retry ${retryRound}: no new items in feeds ` +
+          `[Scout] Round ${retryRound + 1}: no new items in fallback feeds ` +
           `(${emptyRounds}/${MAX_EMPTY_ROUNDS} empty rounds).`
         );
         if (emptyRounds >= MAX_EMPTY_ROUNDS) {
-          this.log('[Scout] Feeds exhausted after consecutive empty rounds — proceeding with partial quota.');
+          this.log('[Scout] All feeds exhausted — proceeding with partial quota.');
           break;
         }
       } else {
-        emptyRounds = 0; // reset on any successful fetch
-        this.log(`[Scout] Retry ${retryRound}: ${retryPool.length} new items found. Continuing triage...`);
-        await this.triagePool(retryPool, buckets, memory, triagedUrls, `Retry ${retryRound}`);
+        emptyRounds = 0;
+        this.log(
+          `[Scout] Round ${retryRound + 1}: ${retryPool.length} new items from fallback feeds. Triaging...`
+        );
+        await this.triagePool(retryPool, buckets, memory, triagedUrls, `Round ${retryRound + 1}`);
       }
 
       retryRound++;
+      if (retryRound > MAX_RETRY_ROUNDS) {
+        this.log(`[Scout] Max retry rounds (${MAX_RETRY_ROUNDS}) reached — proceeding with partial quota.`);
+        break;
+      }
     }
 
     // ── Save updated memory ───────────────────────────────────────────────────
