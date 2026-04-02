@@ -138,7 +138,7 @@ app.post('/api/articles/:id/publish', async (req: Request, res: Response) => {
     const contentHtml = article.contentHtml || (await marked.parse(article.content || ''));
     const images = parseImages(article.images);
 
-    if (!process.env.WP_BASE_URL) {
+    if (!process.env.WP_BASE_URL && !process.env.WP_URL) {
       return res.status(503).json({
         success: false,
         error: 'WordPress is not configured on this server',

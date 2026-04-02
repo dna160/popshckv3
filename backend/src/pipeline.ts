@@ -147,20 +147,20 @@ export class Pipeline {
       // Check abort before each revision attempt
       this.checkAbort();
 
-      // 3-strike rule: after 3 failed revision loops, fail the article
+      // 3-strike rule: after 3 failed revision loops, mark RED for human review
       if (attempt >= MAX_REVISION_LOOPS) {
         this.addLog(
-          `Article "${item.title}" exhausted ${MAX_REVISION_LOOPS} revision loops. Marking FAILED.`,
+          `Article "${item.title}" exhausted ${MAX_REVISION_LOOPS} revision loops. Marking RED for human review.`,
           'warn',
           'Pipeline'
         );
 
         await this.updateArticle(articleId, {
-          status: 'FAILED',
+          status: 'RED',
           revisionCount,
           editorNotes: lastEditorFeedback,
         });
-        return 'FAILED';
+        return 'RED';
       }
 
       // Write or rewrite draft
@@ -256,16 +256,16 @@ export class Pipeline {
       // UNSALVAGEABLE: Editor declared topic dead after max attempts — exit immediately
       if (editorResult.issueType === 'UNSALVAGEABLE') {
         this.addLog(
-          `Article "${item.title}" declared UNSALVAGEABLE. Discarding topic — Scout will find a replacement.`,
+          `Article "${item.title}" declared UNSALVAGEABLE. Marking RED for human review — Scout will find a replacement.`,
           'warn',
           'Editor'
         );
         await this.updateArticle(articleId, {
-          status: 'FAILED',
+          status: 'RED',
           revisionCount,
           editorNotes: editorResult.feedback,
         });
-        return 'FAILED';
+        return 'RED';
       }
 
       // Image issues — get new images from Researcher
@@ -377,9 +377,9 @@ export class Pipeline {
           'Pipeline'
         );
       } else {
-        // FAILED = UNSALVAGEABLE — topic auto-discarded, next candidate queued
+        // RED = did not reach GREEN/YELLOW — topic auto-discarded, next candidate queued
         this.addLog(
-          `[${pillar}] Topic UNSALVAGEABLE: "${topic.title}" — fetching replacement from candidate pool`,
+          `[${pillar}] Topic did not pass (${finalStatus}): "${topic.title}" — fetching replacement from candidate pool`,
           'warn',
           'Pipeline'
         );
