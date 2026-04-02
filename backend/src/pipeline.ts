@@ -248,7 +248,7 @@ export class Pipeline {
       revisionCount++;
 
       this.addLog(
-        `Article "${item.title}" failed review (attempt ${attempt}). Issue: ${editorResult.issueType}`,
+        `Article "${item.title}" failed review (attempt ${attempt + 1}/${MAX_REVISION_LOOPS}) [${editorResult.issueType}] — ${editorResult.feedback}`,
         'warn',
         'Editor'
       );

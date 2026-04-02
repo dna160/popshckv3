@@ -34,11 +34,35 @@ const FRESH_POOL_SIZE        = 50;  // Top-N freshest items to shuffle
 const BATCH_SIZE             = 10;  // Parallel LLM calls per triage batch
 
 const PILLAR_FROM_LABEL: Record<string, Pillar> = {
-  'Japanese Anime':            'anime',
-  'Japanese Gaming':           'gaming',
-  'Japanese Infotainment':     'infotainment',
-  'Japanese Manga':            'manga',
-  'Japanese Toys/Collectibles':'toys',
+  // Canonical labels
+  'Japanese Anime':             'anime',
+  'Japanese Gaming':            'gaming',
+  'Japanese Infotainment':      'infotainment',
+  'Japanese Manga':             'manga',
+  'Japanese Toys/Collectibles': 'toys',
+  // Common LLM short-form aliases
+  'Anime':                      'anime',
+  'anime':                      'anime',
+  'Gaming':                     'gaming',
+  'gaming':                     'gaming',
+  'Game':                       'gaming',
+  'Japanese Game':              'gaming',
+  'Japanese Games':             'gaming',
+  'Infotainment':               'infotainment',
+  'infotainment':               'infotainment',
+  'Japanese Entertainment':     'infotainment',
+  'Entertainment':              'infotainment',
+  'Japanese Pop Culture':       'infotainment',
+  'Manga':                      'manga',
+  'manga':                      'manga',
+  'Japanese Comic':             'manga',
+  'Comics':                     'manga',
+  'Toys':                       'toys',
+  'toys':                       'toys',
+  'Collectibles':               'toys',
+  'Toys/Collectibles':          'toys',
+  'Japanese Toys':              'toys',
+  'Japanese Collectibles':      'toys',
 };
 
 type TriageResult =

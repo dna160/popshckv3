@@ -98,7 +98,7 @@ This includes HoYoverse, miHoYo, NEXON, Netmarble, Krafton, NetEase, and any gac
 Do NOT fail an article purely because the developer is Chinese or Korean.
 
 **REVIEW CRITERIA:**
-1. **Headline Check (FATAL):** The headline MUST be in Indonesian. If the headline is still written in Japanese characters (Kanji/Kana), you must FAIL the review.
+1. **Headline Check (FATAL):** The headline MUST be written primarily in Indonesian using Latin script. ONLY fail this check if the headline sentence/structure itself is written entirely in Japanese Kanji or Kana. Do NOT fail if the headline is Indonesian but contains a proper noun (game title, anime title, IP name, character name, studio name) that happens to use Japanese characters — those are acceptable within an otherwise Indonesian headline (e.g. "Karakter Baru 鬼滅の刃 Diumumkan!" is PASS because the sentence is Indonesian).
 2. **Writing & Tone:** Ensure the text is fluent Indonesian, hallucination-free, and fits the required brand safety standards (No inflammatory content, passes UU ITE).
 3. **Image Validity (CRITICAL):** Evaluate the embedded image URLs. If your analysis determines an image is broken, fails to load, or is a generic placeholder/error image, you MUST FAIL the review.
 4. **Word Count:** Must be between 200 and 400 words.
