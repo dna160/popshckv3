@@ -41,12 +41,10 @@ const PILLAR_FROM_LABEL: Record<string, Pillar> = {
   'Japanese Toys/Collectibles':'toys',
 };
 
-interface TriageResult {
-  status: 'APPROVED' | 'REJECTED';
-  pillar: Pillar;
-  extracted_facts: string;
-  translation_notes: string;
-}
+type TriageResult =
+  | { status: 'APPROVED'; pillar: Pillar; extracted_facts: string; translation_notes: string }
+  | { status: 'REJECTED'; reason: string }
+  | { status: 'PARSE_ERROR'; reason: string };
 
 interface PoolItem {
   title:   string;
@@ -90,7 +88,7 @@ export class Scout {
 
   // ── Phase 4 helper: triage a single item ───────────────────────────────────
 
-  private async triageItem(title: string, summary: string): Promise<TriageResult | null> {
+  private async triageItem(title: string, summary: string): Promise<TriageResult> {
     const prompt = `You are the **Scout Agent** for a Japanese pop-culture newsroom. Your job is to analyze raw Japanese RSS feed items, extract the core facts, and provide accurate localization notes.
 
 **INSTRUCTIONS:**
@@ -136,20 +134,29 @@ Respond ONLY with the JSON object.`;
         translation_notes: string;
       }>(raw);
 
-      if (result.status === 'REJECTED') return null;
+      if (result.status === 'REJECTED') {
+        return { status: 'REJECTED', reason: 'LLM: not relevant to any pillar' };
+      }
 
       const pillar = PILLAR_FROM_LABEL[result.pillar];
-      if (!pillar) return null;
+      if (!pillar) {
+        return {
+          status: 'PARSE_ERROR',
+          reason: `Unknown pillar label from LLM: "${result.pillar}"`,
+        };
+      }
 
       return {
         status: 'APPROVED',
         pillar,
-        extracted_facts:    result.extracted_facts    || '',
-        translation_notes:  result.translation_notes  || '',
+        extracted_facts:   result.extracted_facts   || '',
+        translation_notes: result.translation_notes || '',
       };
     } catch (err) {
-      this.log(`[Scout] Triage failed for "${title}": ${(err as Error).message}`);
-      return null;
+      return {
+        status: 'PARSE_ERROR',
+        reason: `LLM/parse exception: ${(err as Error).message}`,
+      };
     }
   }
 
@@ -213,15 +220,28 @@ Respond ONLY with the JSON object.`;
         batch.map((item) => this.triageItem(item.title, item.summary))
       );
 
+      let batchAccepted = 0;
+      let batchRejected = 0;
+      let batchErrors   = 0;
+      let batchDropped  = 0;
+
       for (let j = 0; j < results.length; j++) {
         const result = results[j];
         const item   = batch[j];
 
-        if (!result) {
-          this.log(`[Scout] Rejected: "${item.title}"`);
+        if (result.status === 'REJECTED') {
+          batchRejected++;
+          this.log(`[Scout] ✗ REJECTED  — ${result.reason} | "${item.title}"`);
           continue;
         }
 
+        if (result.status === 'PARSE_ERROR') {
+          batchErrors++;
+          this.log(`[Scout] ✗ ERROR     — ${result.reason} | "${item.title}"`);
+          continue;
+        }
+
+        // APPROVED
         const bucket = buckets[result.pillar];
         if (bucket.length < MAX_CANDIDATES_PER_PILLAR) {
           bucket.push({
@@ -231,9 +251,22 @@ Respond ONLY with the JSON object.`;
             pillar:           result.pillar,
             translationNotes: result.translation_notes,
           });
-          this.log(`[Scout] Accepted [${result.pillar}] (${bucket.length}/${MAX_CANDIDATES_PER_PILLAR}): "${item.title}"`);
+          batchAccepted++;
+          this.log(`[Scout] ✓ ACCEPTED  [${result.pillar}] (${bucket.length}/${MAX_CANDIDATES_PER_PILLAR}) | "${item.title}"`);
+        } else {
+          batchDropped++;
+          this.log(`[Scout] ~ BUCKET FULL [${result.pillar}] — discarding approved item | "${item.title}"`);
         }
       }
+
+      // Bucket state after each batch
+      const bucketSummary = PILLARS.map(
+        (p) => `${p}:${buckets[p].length}/${MAX_CANDIDATES_PER_PILLAR}`
+      ).join('  ');
+      this.log(
+        `[Scout] Batch ${Math.floor(i / BATCH_SIZE) + 1} done — ` +
+        `accepted:${batchAccepted} rejected:${batchRejected} errors:${batchErrors} dropped:${batchDropped} | ${bucketSummary}`
+      );
     }
 
     // Flatten buckets and log summary
