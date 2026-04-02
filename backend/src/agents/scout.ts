@@ -28,10 +28,10 @@ import { chat, parseJsonResponse } from '../services/llm';
 import type { Pillar, ScoutItem } from '../../../shared/types';
 import { PILLARS, PILLAR_LABELS } from '../../../shared/types';
 
-const TARGET_PER_PILLAR      = 2;   // Pipeline success quota per pillar
-const MAX_CANDIDATES_PER_PILLAR = 8; // Scout collects extras as replacement pool
-const FRESH_POOL_SIZE        = 50;  // Top-N freshest items to shuffle
-const BATCH_SIZE             = 10;  // Parallel LLM calls per triage batch
+const TARGET_PER_PILLAR         = 10;  // Hard minimum candidates Scout must find per pillar
+const MAX_CANDIDATES_PER_PILLAR = 10;  // Bucket cap — same as target
+const FRESH_POOL_SIZE           = 150; // Top-N freshest items to shuffle (must cover 10×5=50 slots + headroom)
+const BATCH_SIZE                = 10;  // Parallel LLM calls per triage batch
 
 const PILLAR_FROM_LABEL: Record<string, Pillar> = {
   // Canonical labels
@@ -301,7 +301,7 @@ Respond ONLY with the JSON object.`;
       }
       if (buckets[pillar].length < TARGET_PER_PILLAR) {
         this.log(
-          `[Scout] Warning: Only ${buckets[pillar].length}/${TARGET_PER_PILLAR} candidates for ${PILLAR_LABELS[pillar]}`
+          `[Scout] ⚠ Underquota: ${buckets[pillar].length}/${TARGET_PER_PILLAR} candidates for ${PILLAR_LABELS[pillar]} — pool exhausted early`
         );
       }
     }

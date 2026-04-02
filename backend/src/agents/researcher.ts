@@ -11,6 +11,7 @@
 
 import { chat, evaluateImageRelevance, parseJsonResponse } from '../services/llm';
 import { searchImages, buildImageQuery } from '../services/serper';
+import { crawlUrl } from '../services/crawler';
 import type { Pillar, ScoutItem, ResearchedItem, ArticleImage } from '../../../shared/types';
 import { PILLAR_LABELS } from '../../../shared/types';
 
@@ -63,16 +64,20 @@ Respond in JSON format:
   }
 
   /**
-   * Extract key facts from article title and summary to help the Copywriter.
+   * Extract key facts from article title, summary, and optionally crawled full content.
    */
-  private async extractFacts(item: ScoutItem): Promise<string[]> {
+  private async extractFacts(item: ScoutItem, crawledContent?: string): Promise<string[]> {
+    const sourceBlock = crawledContent && crawledContent.length > 0
+      ? `Article Full Content (crawled):\n${crawledContent}`
+      : `Article Summary: "${item.summary}"`;
+
     const prompt = `You are a research assistant for a Japanese pop-culture newsroom.
 
 Extract 5–8 key facts from this article that a copywriter can use to write an accurate article.
-Be specific, factual, and concise.
+Be specific, factual, and concise. Prioritise facts from the full content when available.
 
 Article Title: "${item.title}"
-Article Summary: "${item.summary}"
+${sourceBlock}
 Content Pillar: "${PILLAR_LABELS[item.pillar]}"
 
 Respond in JSON format:
@@ -176,8 +181,17 @@ Respond in JSON format:
       };
     }
 
-    // Extract facts
-    const facts = await this.extractFacts(item);
+    // Crawl the source URL for full article content
+    this.log(`[Researcher] Crawling source: ${item.link}`);
+    const crawledContent = await crawlUrl(item.link);
+    if (crawledContent.length > 0) {
+      this.log(`[Researcher] Crawl succeeded (${crawledContent.length} chars) for "${item.title}"`);
+    } else {
+      this.log(`[Researcher] Crawl returned no content — falling back to RSS summary for "${item.title}"`);
+    }
+
+    // Extract facts (uses crawled content when available, RSS summary otherwise)
+    const facts = await this.extractFacts(item, crawledContent);
 
     // Find images
     const images = await this.findImages(item.title, item.pillar);
