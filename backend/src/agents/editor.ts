@@ -67,6 +67,7 @@ export class Editor {
     // ── LLM editorial review ─────────────────────────────────────────────────
     const pillarLabel = PILLAR_LABELS[draft.pillar];
     const wordCount = draft.content.trim().split(/\s+/).length;
+    const attemptNumber = revisionCount + 1; // 1-indexed for the LLM
 
     const imageList = draft.images
       .map((img, i) => `${i + 1}. ${img.isFeatured ? '[FEATURED] ' : ''}${img.alt}: ${img.url}`)
@@ -80,6 +81,8 @@ export class Editor {
 Title: "${draft.title}"
 Pillar: "${pillarLabel}"
 Word Count: ${wordCount} (acceptable range: 300–400)
+
+[Attempt Number]: ${attemptNumber} of 3
 
 Content:
 ---
@@ -96,27 +99,35 @@ ${imageList}
 4. **Word Count:** Must be between 300 and 400 words.
 5. **Structure:** Clear intro, body sections with headers, forward-looking conclusion.
 
-**OUTPUT FORMAT — respond ONLY with a JSON object:**
+**OUTPUT FORMAT AND ROUTING RULES:**
 
-If an image is broken or invalid:
+If the article passes all checks:
+{
+  "status": "PASS",
+  "error_category": "NONE",
+  "reason": "Article meets all standards."
+}
+
+If the article fails AND [Attempt Number] is 1 or 2, send it back for revision:
+{
+  "status": "FAIL",
+  "error_category": "WRITING_REVISION",
+  "reason": "Specify the exact fixes the Copywriter needs to make."
+}
+
+For image failures on attempt 1 or 2:
 {
   "status": "FAIL",
   "error_category": "INCOMPLETE_INFO",
   "reason": "Image X is broken/fails to load. Send back to Researcher for replacement."
 }
 
-If the headline is in Japanese or writing needs work:
+**[CRITICAL] FATAL TOPIC REJECTION — if [Attempt Number] is 3 and the article still fails:**
+You must declare the topic unsalvageable. Do NOT send it back to the Copywriter.
 {
-  "status": "FAIL",
-  "error_category": "WRITING_REVISION",
-  "reason": "Specific actionable feedback for the copywriter."
-}
-
-If the article is perfect:
-{
-  "status": "PASS",
-  "error_category": "NONE",
-  "reason": "Article meets all editorial and visual standards."
+  "status": "UNSALVAGEABLE",
+  "error_category": "MAX_REVISIONS_REACHED",
+  "reason": "Failed to meet standards after 3 attempts. Scrapping topic. Scout must find an alternative news story."
 }`;
 
     try {
@@ -133,6 +144,7 @@ If the article is perfect:
 
       const passed = result.status === 'PASS';
       const issueType: EditorResult['issueType'] =
+        result.status === 'UNSALVAGEABLE'          ? 'UNSALVAGEABLE' :
         result.error_category === 'INCOMPLETE_INFO' ? 'IMAGE' :
         result.error_category === 'WRITING_REVISION' ? 'MAJOR' :
         null;

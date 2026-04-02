@@ -19,6 +19,7 @@ import { Researcher } from './agents/researcher';
 import { Copywriter } from './agents/copywriter';
 import { Editor } from './agents/editor';
 import { publishArticle } from './services/wordpress';
+import { PILLARS } from '../../shared/types';
 import type {
   Pillar,
   ScoutItem,
@@ -28,7 +29,7 @@ import type {
 } from '../../shared/types';
 
 const MAX_REVISION_LOOPS = 3;
-const ARTICLES_PER_PILLAR = 2;
+const ARTICLES_PER_PILLAR = 2; // Target successes per pillar per run
 
 export class Pipeline {
   private prisma: PrismaClient;
@@ -247,12 +248,27 @@ export class Pipeline {
       revisionCount++;
 
       this.addLog(
-        `Article "${item.title}" failed review (attempt ${attempt + 1}). Issue: ${editorResult.issueType}`,
+        `Article "${item.title}" failed review (attempt ${attempt}). Issue: ${editorResult.issueType}`,
         'warn',
         'Editor'
       );
 
-      // Edge Case 3: Image issues — get new images from Researcher
+      // UNSALVAGEABLE: Editor declared topic dead after max attempts — exit immediately
+      if (editorResult.issueType === 'UNSALVAGEABLE') {
+        this.addLog(
+          `Article "${item.title}" declared UNSALVAGEABLE. Discarding topic — Scout will find a replacement.`,
+          'warn',
+          'Editor'
+        );
+        await this.updateArticle(articleId, {
+          status: 'FAILED',
+          revisionCount,
+          editorNotes: editorResult.feedback,
+        });
+        return 'FAILED';
+      }
+
+      // Image issues — get new images from Researcher
       if (editorResult.issueType === 'IMAGE') {
         this.addLog(`Fetching replacement images for "${item.title}"...`, 'info', 'Researcher');
         const existingUrls = new Set(currentImages.map((img) => img.url));
@@ -315,15 +331,84 @@ export class Pipeline {
   }
 
   /**
+   * Dynamic per-pillar queue.
+   * Processes candidates one by one until the success quota is met.
+   * If a topic is UNSALVAGEABLE the next candidate is tried automatically.
+   * Returns the number of articles that reached GREEN or YELLOW.
+   */
+  private async runPillarQueue(
+    pillar: Pillar,
+    candidates: ScoutItem[],
+    target: number
+  ): Promise<number> {
+    let successCount = 0;
+
+    for (const topic of candidates) {
+      if (successCount >= target) break;
+      this.checkAbort();
+
+      this.addLog(
+        `[${pillar}] Processing candidate (${successCount}/${target} done): "${topic.title}"`,
+        'info',
+        'Pipeline'
+      );
+
+      // Research
+      const researched = await this.researcher.researchItem(topic);
+      if (!researched.approved) {
+        this.addLog(`[${pillar}] Researcher rejected "${topic.title}" — trying next candidate`, 'warn', 'Researcher');
+        await this.scout.markProcessed(topic.link);
+        continue;
+      }
+
+      // Create DB record and process
+      const articleId = await this.createArticleRecord(topic);
+      const finalStatus = await this.processArticle(articleId, researched);
+      await this.scout.markProcessed(topic.link);
+
+      this.addLog(`Completed article "${topic.title}". Final status: ${finalStatus}`, 'info', 'Pipeline');
+      await this.persistLogs();
+
+      if (finalStatus === 'GREEN' || finalStatus === 'YELLOW') {
+        successCount++;
+        this.addLog(
+          `[${pillar}] Success ${successCount}/${target}: "${topic.title}"`,
+          'info',
+          'Pipeline'
+        );
+      } else {
+        // FAILED = UNSALVAGEABLE — topic auto-discarded, next candidate queued
+        this.addLog(
+          `[${pillar}] Topic UNSALVAGEABLE: "${topic.title}" — fetching replacement from candidate pool`,
+          'warn',
+          'Pipeline'
+        );
+      }
+    }
+
+    if (successCount < target) {
+      this.addLog(
+        `[${pillar}] Candidate pool exhausted — achieved ${successCount}/${target} successes`,
+        'warn',
+        'Pipeline'
+      );
+    }
+
+    return successCount;
+  }
+
+  /**
    * Main pipeline run.
-   * 1. Scout fetches candidates (with feedback loop for Researcher rejections)
-   * 2. Researcher approves/rejects and gathers images
-   * 3. Copywriter + Editor loop per article
+   *
+   * Phase 1 — Scout collects a large candidate pool for all pillars.
+   * Phase 2 — Each pillar runs its own dynamic queue:
+   *   • Articles go through Researcher → Copywriter → Editor (max 3 attempts).
+   *   • UNSALVAGEABLE articles are discarded; the next candidate is tried automatically.
+   *   • The queue stops when the pillar hits its success quota or runs out of candidates.
    */
   async run(): Promise<{ runId: string; articlesProcessed: number }> {
     this.logs = [];
 
-    // Create pipeline run record
     const pipelineRun = await this.prisma.pipelineRun.create({
       data: { status: 'RUNNING' },
     });
@@ -334,98 +419,36 @@ export class Pipeline {
     let articlesProcessed = 0;
 
     try {
-      // Phase 1: Scout with feedback loop
-      const rejectedUrls = new Set<string>();
-      let approvedItems: ResearchedItem[] = [];
-      const targetPerPillar: Record<Pillar, number> = {
-        anime: ARTICLES_PER_PILLAR,
-        gaming: ARTICLES_PER_PILLAR,
-        infotainment: ARTICLES_PER_PILLAR,
-        manga: ARTICLES_PER_PILLAR,
-        toys: ARTICLES_PER_PILLAR,
+      // ── Phase 1: Scout ────────────────────────────────────────────────────
+      this.addLog('Scout collecting candidate pool for all pillars...', 'info', 'Pipeline');
+      const allCandidates = await this.scout.run();
+
+      // Group candidates by pillar
+      const candidatesByPillar: Record<Pillar, ScoutItem[]> = {
+        anime: allCandidates.filter((i) => i.pillar === 'anime'),
+        gaming: allCandidates.filter((i) => i.pillar === 'gaming'),
+        infotainment: allCandidates.filter((i) => i.pillar === 'infotainment'),
+        manga: allCandidates.filter((i) => i.pillar === 'manga'),
+        toys: allCandidates.filter((i) => i.pillar === 'toys'),
       };
 
-      // Scout+Researcher feedback loop: keep fetching until quota is met
-      let feedbackLoopAttempts = 0;
-      const MAX_FEEDBACK_LOOPS = 3;
-
-      while (feedbackLoopAttempts < MAX_FEEDBACK_LOOPS) {
-        this.checkAbort();
-        feedbackLoopAttempts++;
-        this.addLog(`Scout+Researcher feedback loop attempt ${feedbackLoopAttempts}`, 'info', 'Pipeline');
-
-        // Scout run with rejected URLs excluded
-        const scoutItems = await this.scout.run(rejectedUrls);
-
-        if (scoutItems.length === 0) {
-          this.addLog('Scout found no new articles. Ending feedback loop.', 'warn', 'Pipeline');
-          break;
-        }
-
-        // Researcher run
-        const { approved, rejected } = await this.researcher.run(scoutItems);
-
-        // Add approved items (avoid duplicates)
-        const existingUrls = new Set(approvedItems.map((i) => i.link));
-        for (const item of approved) {
-          if (!existingUrls.has(item.link)) {
-            approvedItems.push(item);
-            existingUrls.add(item.link);
-          }
-        }
-
-        // Track rejected URLs for feedback loop
-        for (const item of rejected) {
-          rejectedUrls.add(item.link);
-        }
-
-        // Check if quota is met
-        const quotaMet = Object.values(targetPerPillar).every((target) => {
-          // Count approved items per pillar
-          const pillarApproved = approvedItems.filter((i) => {
-            // We'll just check total for simplicity
-            return true;
-          }).length;
-          return true; // Simplified — continue loop only if rejections occurred
-        });
-
-        if (rejected.length === 0) {
-          this.addLog('All Scout items approved. Proceeding.', 'info', 'Pipeline');
-          break;
-        }
-
+      for (const pillar of PILLARS) {
         this.addLog(
-          `${rejected.length} items rejected. Requesting more from Scout...`,
+          `Scout found ${candidatesByPillar[pillar].length} candidates for ${pillar}`,
           'info',
           'Pipeline'
         );
       }
 
-      this.addLog(
-        `Pipeline has ${approvedItems.length} approved articles to process.`,
-        'info',
-        'Pipeline'
+      // ── Phase 2: Per-pillar dynamic queues (run in parallel) ─────────────
+      const pillarResults = await Promise.all(
+        PILLARS.map((pillar) =>
+          this.runPillarQueue(pillar, candidatesByPillar[pillar], ARTICLES_PER_PILLAR)
+        )
       );
 
-      // Phase 2: Process all approved articles in parallel through Copywriter → Editor loop
-      await Promise.all(
-        approvedItems.map(async (item) => {
-          this.checkAbort();
-          const articleId = await this.createArticleRecord(item);
-          await this.scout.markProcessed(item.link);
-          this.addLog(`Processing article: "${item.title}" [${item.pillar}]`, 'info', 'Pipeline');
-          const finalStatus = await this.processArticle(articleId, item);
-          articlesProcessed++;
-          this.addLog(
-            `Completed article "${item.title}". Final status: ${finalStatus}`,
-            'info',
-            'Pipeline'
-          );
-          await this.persistLogs();
-        })
-      );
+      articlesProcessed = pillarResults.reduce((sum, count) => sum + count, 0);
 
-      // Mark pipeline run as completed
       await this.prisma.pipelineRun.update({
         where: { id: this.runId },
         data: {
@@ -437,13 +460,12 @@ export class Pipeline {
       });
 
       this.addLog(
-        `Pipeline run completed. Processed ${articlesProcessed} articles.`,
+        `Pipeline run completed. ${articlesProcessed} articles published/queued.`,
         'info',
         'Pipeline'
       );
     } catch (err) {
       const isAbort = (err as Error).message === 'ABORTED';
-      const finalStatus = isAbort ? 'ABORTED' : 'FAILED';
       this.addLog(
         isAbort ? 'Pipeline aborted by user.' : `Pipeline run failed: ${(err as Error).message}`,
         isAbort ? 'warn' : 'error',
@@ -453,7 +475,7 @@ export class Pipeline {
       await this.prisma.pipelineRun.update({
         where: { id: this.runId! },
         data: {
-          status: finalStatus,
+          status: isAbort ? 'ABORTED' : 'FAILED',
           articlesProcessed,
           completedAt: new Date(),
           logs: JSON.stringify(this.logs),

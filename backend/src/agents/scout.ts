@@ -15,7 +15,8 @@ import { chat, parseJsonResponse } from '../services/llm';
 import type { Pillar, ScoutItem } from '../../../shared/types';
 import { PILLARS, PILLAR_LABELS } from '../../../shared/types';
 
-const ARTICLES_PER_PILLAR = 2;
+const TARGET_PER_PILLAR = 2;          // How many successes the pipeline needs per pillar
+const MAX_CANDIDATES_PER_PILLAR = 8;  // Max scout candidates to collect (includes replacements)
 
 const PILLAR_FROM_LABEL: Record<string, Pillar> = {
   'Japanese Anime': 'anime',
@@ -185,7 +186,7 @@ Respond ONLY with the JSON object.`;
       if (!entry) continue;
       const { item, result } = entry;
       const bucket = byPillar[result.pillar];
-      if (bucket.length < ARTICLES_PER_PILLAR) {
+      if (bucket.length < MAX_CANDIDATES_PER_PILLAR) {
         bucket.push({
           title: item.title,
           link: item.link,
@@ -202,9 +203,9 @@ Respond ONLY with the JSON object.`;
         this.log(`[Scout] Selected: "${item.title}" [${pillar}]`);
         selected.push(item);
       }
-      if (byPillar[pillar].length < ARTICLES_PER_PILLAR) {
+      if (byPillar[pillar].length < TARGET_PER_PILLAR) {
         this.log(
-          `[Scout] Warning: Only found ${byPillar[pillar].length}/${ARTICLES_PER_PILLAR} items for ${PILLAR_LABELS[pillar]}`
+          `[Scout] Warning: Only found ${byPillar[pillar].length}/${TARGET_PER_PILLAR} items for ${PILLAR_LABELS[pillar]}`
         );
       }
     }

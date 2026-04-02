@@ -100,7 +100,7 @@ export interface EditorResult {
   autoFixed: boolean;
   fixedContent?: string;
   feedback: string;
-  issueType?: 'MINOR' | 'MAJOR' | 'IMAGE' | null;
+  issueType?: 'MINOR' | 'MAJOR' | 'IMAGE' | 'UNSALVAGEABLE' | null;
   hallucinations?: string[];
 }
 

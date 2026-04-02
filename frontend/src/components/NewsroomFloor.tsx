@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { PipelineStatusData, DashboardStats } from '../types';
 import { PILLAR_LABELS, PILLARS } from '../types';
 import { triggerPipeline } from '../api';
@@ -94,10 +95,10 @@ const LogModal: React.FC<LogModalProps> = ({ logs, isRunning, onClose }) => {
     return () => window.removeEventListener('keydown', handleKey);
   }, [onClose]);
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex flex-col bg-newsroom-bg/95 backdrop-blur-sm"
-      style={{ fontFamily: 'monospace' }}
+      className="fixed inset-0 flex flex-col bg-newsroom-bg backdrop-blur-sm"
+      style={{ fontFamily: 'monospace', zIndex: 9999 }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       {/* Header */}
@@ -152,7 +153,8 @@ const LogModal: React.FC<LogModalProps> = ({ logs, isRunning, onClose }) => {
         )}
         <div ref={endRef} />
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };
 
