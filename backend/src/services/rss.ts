@@ -22,13 +22,26 @@ export interface RssItem {
  * item to the correct pillar based on content relevance.
  */
 export const PRIORITY_FEEDS: string[] = [
-  'https://automaton-media.com/feed/',                // Automaton — gaming, anime, manga (replaces dead Famitsu)
+  // ── Gaming / Anime (high-volume) ──────────────────────────────────────────
+  'https://automaton-media.com/feed/',                // Automaton — gaming, anime, manga
   'https://www.4gamer.net/rss/index.xml',             // 4Gamer — gaming
-  'https://hobby.dengeki.com/feed/',                  // Dengeki Hobby — toys/collectibles
-  'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) — anime, manga, infotainment
-  'https://news.denfaminicogamer.jp/feed',            // Denfami — gaming, manga, anime (replaces empty Mantan)
-  'https://essential-japan.com/feed/',                // Essential Japan — infotainment, lifestyle, culture
+  'https://news.denfaminicogamer.jp/feed',            // Denfami — gaming, manga, anime
+
+  // ── Toys / Collectibles ───────────────────────────────────────────────────
+  'https://hobby.dengeki.com/feed/',                  // Dengeki Hobby — hobby/toys
   'https://www.toy-people.com/rss.php',               // Toy People News — toys/collectibles
+  'https://ngeekhiong.blogspot.com/feeds/posts/default', // Ngeek Hiong — figure/collector news
+  'https://www.gunjap.net/site/?feed=rss2',           // GunJap — Gunpla/model kits
+
+  // ── Infotainment / Culture ────────────────────────────────────────────────
+  'https://essential-japan.com/feed/',                // Essential Japan — lifestyle/culture
+  'https://soranews24.com/feed/',                     // SoraNews24 — viral JP infotainment
+  'https://japantoday.com/feed',                      // Japan Today — JP news/infotainment
+
+  // ── Manga ─────────────────────────────────────────────────────────────────
+  'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) — manga/anime/music
+  'https://www.animenewsnetwork.com/all/rss.xml?ann-edition=w', // ANN — manga & anime news
+  'https://animecorner.me/category/manga/feed/',      // Anime Corner — manga reviews/news
 ];
 
 /**
