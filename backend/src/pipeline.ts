@@ -199,7 +199,7 @@ export class Pipeline {
 
         // Auto-publish GREEN articles to WordPress
         if (status === 'GREEN') {
-          await this.tryPublishToWordPress(articleId, item.title, finalHtml, currentImages);
+          await this.tryPublishToWordPress(articleId, item.title, finalHtml, currentImages, item.pillar);
         }
 
         return status;
@@ -248,7 +248,8 @@ export class Pipeline {
     articleId: string,
     title: string,
     contentHtml: string,
-    images: Array<{ url: string; alt: string; isFeatured: boolean }>
+    images: Array<{ url: string; alt: string; isFeatured: boolean }>,
+    pillar?: Pillar
   ): Promise<void> {
     if (!process.env.WP_BASE_URL && !process.env.WP_URL) {
       this.addLog('WordPress not configured — skipping auto-publish', 'info', 'Pipeline');
@@ -257,7 +258,7 @@ export class Pipeline {
 
     try {
       this.addLog(`Publishing "${title}" to WordPress...`, 'info', 'WordPress');
-      const { wpPostId, wpPostUrl } = await publishArticle(title, contentHtml, images);
+      const { wpPostId, wpPostUrl } = await publishArticle(title, contentHtml, images, pillar);
 
       await this.updateArticle(articleId, {
         status: 'PUBLISHED',

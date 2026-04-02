@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-import type { ArticleImage } from '../../../shared/types';
+import type { ArticleImage, Pillar } from '../../../shared/types';
 
 dotenv.config();
 
@@ -28,6 +28,14 @@ export interface WpMediaResponse {
   id: number;
   source_url: string;
 }
+
+const wpCategoryMap: Record<Pillar, number> = {
+  anime: 11,        // Anime
+  gaming: 13,       // Game
+  infotainment: 10, // Infotainment
+  manga: 14,        // Comic (no dedicated Manga category)
+  toys: 12,         // Toys
+};
 
 function getAuthHeader(): string {
   if (!WP_USERNAME || !WP_APP_PASSWORD) {
@@ -117,7 +125,8 @@ export async function createPost(payload: WpPostPayload): Promise<WpPostResponse
 export async function publishArticle(
   title: string,
   contentHtml: string,
-  images: ArticleImage[]
+  images: ArticleImage[],
+  pillar?: Pillar
 ): Promise<{ wpPostId: number; wpPostUrl: string }> {
   if (!WP_BASE_URL) {
     throw new Error('WP_BASE_URL is not configured');
@@ -149,11 +158,14 @@ export async function publishArticle(
     finalHtml = finalHtml.split(uploaded.originalUrl).join(uploaded.wpUrl);
   }
 
+  const categoryId = pillar ? wpCategoryMap[pillar] : undefined;
+
   const post = await createPost({
     title,
     content: finalHtml,
     status: 'publish',
     featured_media: featuredMediaId,
+    ...(categoryId !== undefined ? { categories: [categoryId] } : {}),
   });
 
   return {

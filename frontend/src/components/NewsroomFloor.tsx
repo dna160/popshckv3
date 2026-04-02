@@ -81,6 +81,12 @@ const LogModal: React.FC<LogModalProps> = ({ logs, isRunning, onClose }) => {
   }, [logs.length]);
 
   useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, []);
+
+  useEffect(() => {
     function handleKey(e: KeyboardEvent) {
       if (e.key === 'Escape') onClose();
     }
@@ -113,7 +119,7 @@ const LogModal: React.FC<LogModalProps> = ({ logs, isRunning, onClose }) => {
       </div>
 
       {/* Log body */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-0.5">
+      <div className="flex-1 overflow-y-auto p-6 space-y-0.5" style={{ overscrollBehavior: 'contain' }}>
         {logs.length === 0 ? (
           <p className="text-newsroom-subtle text-sm">No logs available.</p>
         ) : (

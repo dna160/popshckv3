@@ -12,7 +12,7 @@ import { marked } from 'marked';
 import dotenv from 'dotenv';
 import { runPipeline, isPipelineRunning, abortPipeline } from './continuous-pipeline';
 import { publishArticle } from './services/wordpress';
-import type { ArticleImage, ApiResponse } from '../../shared/types';
+import type { ArticleImage, ApiResponse, Pillar } from '../../shared/types';
 
 dotenv.config();
 
@@ -145,7 +145,7 @@ app.post('/api/articles/:id/publish', async (req: Request, res: Response) => {
       });
     }
 
-    const { wpPostId, wpPostUrl } = await publishArticle(article.title, contentHtml, images);
+    const { wpPostId, wpPostUrl } = await publishArticle(article.title, contentHtml, images, article.pillar as Pillar);
 
     await prisma.article.update({
       where: { id: article.id },
