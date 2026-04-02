@@ -27,6 +27,8 @@ export const PRIORITY_FEEDS: string[] = [
   'https://hobby.dengeki.com/feed/',                  // Dengeki Hobby — toys/collectibles
   'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) — anime, manga, infotainment
   'https://news.denfaminicogamer.jp/feed',            // Denfami — gaming, manga, anime (replaces empty Mantan)
+  'https://essential-japan.com/feed/',                // Essential Japan — infotainment, lifestyle, culture
+  'https://www.toy-people.com/rss.php',               // Toy People News — toys/collectibles
 ];
 
 /**

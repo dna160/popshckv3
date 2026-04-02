@@ -30,14 +30,19 @@ export class Researcher {
    */
   private async deepEvaluateTopic(item: ScoutItem): Promise<{ approved: boolean; reason: string }> {
     const pillarLabel = PILLAR_LABELS[item.pillar];
-    const prompt = `You are a senior editor at a Japanese pop-culture newsroom. Perform a thorough evaluation.
+    const prompt = `You are a senior editor at an Asian pop-culture newsroom covering anime, gaming, manga, toys, and infotainment.
 
 Article Title: "${item.title}"
 Article Summary: "${item.summary}"
 Declared Pillar: "${pillarLabel}"
 
+**DEVELOPER/ORIGIN POLICY — Gaming pillar:**
+APPROVE games and gaming content from Japanese, Chinese, AND Korean developers/publishers.
+This includes (but is not limited to): HoYoverse (Genshin Impact, Honkai), miHoYo, NEXON, Netmarble, Krafton, NetEase, and any gacha/anime-style game regardless of country of origin.
+Only REJECT a gaming article if the game has zero connection to anime/manga aesthetics or Asian pop-culture (e.g. Western AAA shooters, sports sims).
+
 Determine:
-1. Is this article genuinely relevant to the "${pillarLabel}" pillar?
+1. Is this article genuinely relevant to the "${pillarLabel}" pillar using the policy above?
 2. Is the topic interesting and newsworthy for our audience?
 3. Is there enough information to write a 300–400 word article?
 

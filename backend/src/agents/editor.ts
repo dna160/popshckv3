@@ -92,6 +92,11 @@ ${draft.content}
 [Images] (${draft.images.length} total):
 ${imageList}
 
+**DEVELOPER/ORIGIN POLICY:**
+Content from Japanese, Chinese, AND Korean developers/publishers is in-scope.
+This includes HoYoverse, miHoYo, NEXON, Netmarble, Krafton, NetEase, and any gacha or anime-style game.
+Do NOT fail an article purely because the developer is Chinese or Korean.
+
 **REVIEW CRITERIA:**
 1. **Headline Check (FATAL):** The headline MUST be in Indonesian. If the headline is still written in Japanese characters (Kanji/Kana), you must FAIL the review.
 2. **Writing & Tone:** Ensure the text is fluent Indonesian, hallucination-free, and fits the required brand safety standards (No inflammatory content, passes UU ITE).
@@ -101,25 +106,27 @@ ${imageList}
 
 **OUTPUT FORMAT AND ROUTING RULES:**
 
+IMPORTANT: Keep all "reason" values to 4–5 words maximum. Be blunt and specific (e.g. "headline still in Japanese", "word count too low", "broken featured image", "intro section missing").
+
 If the article passes all checks:
 {
   "status": "PASS",
   "error_category": "NONE",
-  "reason": "Article meets all standards."
+  "reason": "All standards met."
 }
 
 If the article fails AND [Attempt Number] is 1 or 2, send it back for revision:
 {
   "status": "FAIL",
   "error_category": "WRITING_REVISION",
-  "reason": "Specify the exact fixes the Copywriter needs to make."
+  "reason": "4–5 word fix instruction"
 }
 
 For image failures on attempt 1 or 2:
 {
   "status": "FAIL",
   "error_category": "INCOMPLETE_INFO",
-  "reason": "Image X is broken/fails to load. Send back to Researcher for replacement."
+  "reason": "Broken image URL detected."
 }
 
 **[CRITICAL] FATAL TOPIC REJECTION — if [Attempt Number] is 3 and the article still fails:**
@@ -127,7 +134,7 @@ You must declare the topic unsalvageable. Do NOT send it back to the Copywriter.
 {
   "status": "UNSALVAGEABLE",
   "error_category": "MAX_REVISIONS_REACHED",
-  "reason": "Failed to meet standards after 3 attempts. Scrapping topic. Scout must find an alternative news story."
+  "reason": "4–5 word failure summary"
 }`;
 
     try {
