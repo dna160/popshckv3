@@ -258,7 +258,7 @@ export class Pipeline {
         this.addLog(
           `Article "${item.title}" declared UNSALVAGEABLE. Marking RED for human review — Scout will find a replacement.`,
           'warn',
-          'Editor'
+          'Pipeline'
         );
         await this.updateArticle(articleId, {
           status: 'RED',

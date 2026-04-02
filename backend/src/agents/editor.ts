@@ -156,10 +156,14 @@ You must declare the topic unsalvageable. Do NOT send it back to the Copywriter.
         result.error_category === 'WRITING_REVISION' ? 'MAJOR' :
         null;
 
-      this.log(
-        `[Editor] Review complete for "${draft.title}": ${passed ? 'PASS' : 'FAIL'}` +
-        (issueType ? ` [${issueType}]` : '')
-      );
+      // Only log failures — pipeline.ts reports final GREEN/YELLOW status on pass
+      if (!passed) {
+        this.log(
+          `[Editor] Review FAIL for "${draft.title}"` +
+          (issueType ? ` [${issueType}]` : '') +
+          (result.reason ? ` — ${result.reason}` : '')
+        );
+      }
 
       return {
         passed,
