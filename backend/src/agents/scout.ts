@@ -1,32 +1,44 @@
 /**
  * Agent 1: RSS Feeder & Triage (The Scout)
  *
- * Algorithm: Freshness & Parallel Scatter  +  Adaptive Feed Prioritization
+ * Algorithm: Freshness & Parallel Scatter  +  Empirical Feed Memory
  *
  *   Phase 1 — Concurrent Aggregation
- *             All PRIORITY_FEEDS fetched simultaneously via Promise.allSettled.
+ *             All PRIORITY_FEEDS fetched simultaneously. Each item is tagged
+ *             with the hostname of the feed it came from (sourceFeed).
  *
  *   Phase 2 — Global Freshness Sort + Age Filter
- *             Pool sorted by pubDate descending; items older than AGE_LIMIT_DAYS dropped.
+ *             Pool sorted by pubDate descending; items older than AGE_LIMIT_DAYS
+ *             are discarded.
  *
  *   Phase 3 — Anti-Dominance Shuffle
- *             Top FRESH_POOL_SIZE items Fisher-Yates shuffled to prevent any single
- *             high-volume feed monopolising the triage queue.
+ *             Top FRESH_POOL_SIZE items Fisher-Yates shuffled to prevent a single
+ *             high-volume feed from monopolising early batches.
  *
- *   Phase 4 — Adaptive Batch Triage
+ *   Phase 4 — Adaptive Batch Triage with Empirical Memory
  *             Items triaged in parallel batches of BATCH_SIZE.
- *             After each batch, remaining items are re-sorted by a "need score":
- *             items from feeds affiliated with underfilled buckets float to the top;
- *             items from feeds whose bucket is already full sink to the bottom
- *             (but are never discarded — they stay as low-priority fallback).
+ *             After each batch, the remaining pool is re-scored using FeedMemory:
+ *
+ *             score(item) = Σ_pillar [ historical_rate(feed, pillar) × need(pillar) ]
+ *
+ *             where:
+ *               historical_rate(feed, pillar) = past approvals for this pillar from feed
+ *                                               ─────────────────────────────────────
+ *                                               total approvals from feed (all pillars)
+ *               need(pillar) = 1 − (bucket_fill / MAX_CANDIDATES_PER_PILLAR)
+ *
+ *             Feeds with no history score 0.5 (neutral — not penalised).
+ *             Every APPROVED outcome updates the persistent memory file so the
+ *             system becomes more accurate with each run.
  *
  *   Phase 5 — Underquota Retry
- *             If any pillar bucket is still under TARGET_PER_PILLAR after Phase 4,
- *             the Scout re-fetches feeds with an expanded age window (AGE_RETRY_DAYS)
- *             and repeats the triage loop for the missing pillars only.
- *             Up to MAX_RETRY_ROUNDS retries are attempted.
+ *             If any pillar is still under TARGET_PER_PILLAR, re-fetch with an
+ *             expanded age window (AGE_RETRY_DAYS) and re-run triage, up to
+ *             MAX_RETRY_ROUNDS times.
  */
 
+import path from 'path';
+import fs   from 'fs/promises';
 import { PrismaClient } from '@prisma/client';
 import { fetchPillarFeeds } from '../services/rss';
 import { chat, parseJsonResponse } from '../services/llm';
@@ -34,52 +46,23 @@ import type { Pillar, ScoutItem } from '../../../shared/types';
 import { PILLARS, PILLAR_LABELS } from '../../../shared/types';
 
 // ── Constants ────────────────────────────────────────────────────────────────
-const TARGET_PER_PILLAR         = 10;   // Hard minimum per pillar
-const MAX_CANDIDATES_PER_PILLAR = 10;   // Bucket cap (same as target)
-const FRESH_POOL_SIZE           = 150;  // Top-N freshest items to shuffle
-const BATCH_SIZE                = 10;   // Parallel LLM calls per triage batch
-const AGE_LIMIT_DAYS            = 7;    // Initial age filter
-const AGE_RETRY_DAYS            = 14;   // Expanded age filter on retry
-const MAX_RETRY_ROUNDS          = 2;    // Max underquota retry attempts
+const TARGET_PER_PILLAR         = 10;
+const MAX_CANDIDATES_PER_PILLAR = 10;
+const FRESH_POOL_SIZE           = 150;
+const BATCH_SIZE                = 10;
+const AGE_LIMIT_DAYS            = 7;
+const AGE_RETRY_DAYS            = 14;
+const MAX_RETRY_ROUNDS          = 2;
 
-// ── Feed → Pillar affinity ────────────────────────────────────────────────────
-// Maps feed domain substrings to the pillar they predominantly produce.
-// Used to dynamically re-score the remaining pool after each batch so that
-// items from feeds aligned with underfilled buckets are prioritised.
-const FEED_AFFINITY: Array<{ pattern: string; pillar: Pillar }> = [
-  // Gaming feeds
-  { pattern: '4gamer.net',          pillar: 'gaming' },
-  { pattern: 'automaton-media.com', pillar: 'gaming' },
-  { pattern: 'denfaminicogamer.jp', pillar: 'gaming' },
-  { pattern: 'siliconera.com',      pillar: 'gaming' },
-  // Toys / Collectibles feeds
-  { pattern: 'dengeki.com',         pillar: 'toys'   },
-  { pattern: 'toy-people.com',      pillar: 'toys'   },
-  { pattern: 'ngeekhiong.blogspot', pillar: 'toys'   },
-  { pattern: 'gunjap.net',          pillar: 'toys'   },
-  { pattern: 'toyark.com',          pillar: 'toys'   },
-  // Infotainment feeds
-  { pattern: 'essential-japan.com', pillar: 'infotainment' },
-  { pattern: 'soranews24.com',      pillar: 'infotainment' },
-  { pattern: 'japantoday.com',      pillar: 'infotainment' },
-  { pattern: 'tokyoweekender.com',  pillar: 'infotainment' },
-  // Manga feeds
-  { pattern: 'animenewsnetwork.com',pillar: 'manga'  },
-  { pattern: 'animecorner.me',      pillar: 'manga'  },
-  // Anime / Mixed feeds (lower affinity score — they'll compete with above)
-  { pattern: 'natalie.mu',          pillar: 'anime'  },
-  { pattern: 'hostdon.jp',          pillar: 'anime'  },
-];
+const MEMORY_FILE = path.join(process.cwd(), 'data', 'feed-memory.json');
 
-// ── Pillar label → Pillar alias map ──────────────────────────────────────────
+// ── Pillar label alias map ────────────────────────────────────────────────────
 const PILLAR_FROM_LABEL: Record<string, Pillar> = {
-  // Canonical labels
   'Japanese Anime':             'anime',
   'Japanese Gaming':            'gaming',
   'Japanese Infotainment':      'infotainment',
   'Japanese Manga':             'manga',
   'Japanese Toys/Collectibles': 'toys',
-  // Common LLM short-form aliases
   'Anime':                      'anime',
   'anime':                      'anime',
   'Gaming':                     'gaming',
@@ -111,11 +94,15 @@ type TriageResult =
   | { status: 'PARSE_ERROR'; reason: string };
 
 interface PoolItem {
-  title:   string;
-  link:    string;
-  summary: string;
-  pubDate?: string;
+  title:      string;
+  link:       string;
+  summary:    string;
+  pubDate?:   string;
+  sourceFeed: string; // hostname of the originating RSS feed
 }
+
+type PillarCounts  = Record<Pillar, number>;
+type FeedMemoryData = Record<string, PillarCounts>;
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 function shuffle<T>(arr: T[]): T[] {
@@ -126,27 +113,83 @@ function shuffle<T>(arr: T[]): T[] {
   return arr;
 }
 
-/** Return the affinity pillar for an item's URL, or null if unknown. */
-function getAffinity(url: string): Pillar | null {
-  for (const entry of FEED_AFFINITY) {
-    if (url.includes(entry.pattern)) return entry.pillar;
-  }
-  return null;
+function emptyPillarCounts(): PillarCounts {
+  return { anime: 0, gaming: 0, infotainment: 0, manga: 0, toys: 0 };
 }
 
-/**
- * Compute a 0–1 priority score for an item given current bucket fill levels.
- * Higher score = higher priority = processed sooner.
- *   - Affinity pillar bucket empty  → score ~1.0
- *   - Affinity pillar bucket full   → score ~0.1  (deprioritised, not dropped)
- *   - No known affinity             → score  0.5  (neutral)
- */
-function needScore(item: PoolItem, buckets: Record<Pillar, ScoutItem[]>): number {
-  const affinity = getAffinity(item.link);
-  if (!affinity) return 0.5;
-  const fill = buckets[affinity].length / MAX_CANDIDATES_PER_PILLAR;
-  if (fill >= 1.0) return 0.1;
-  return 1.0 - fill * 0.9; // 1.0 when empty, 0.1 when full
+// ── Empirical Feed Memory ─────────────────────────────────────────────────────
+class FeedMemory {
+  private data: FeedMemoryData = {};
+
+  async load(log: (msg: string) => void): Promise<void> {
+    try {
+      const raw = await fs.readFile(MEMORY_FILE, 'utf-8');
+      this.data = JSON.parse(raw) as FeedMemoryData;
+      log(`[Scout] Feed memory loaded (${Object.keys(this.data).length} feeds tracked)`);
+    } catch {
+      this.data = {};
+      log('[Scout] Feed memory: no history file yet — starting fresh');
+    }
+  }
+
+  async save(log: (msg: string) => void): Promise<void> {
+    try {
+      await fs.mkdir(path.dirname(MEMORY_FILE), { recursive: true });
+      await fs.writeFile(MEMORY_FILE, JSON.stringify(this.data, null, 2), 'utf-8');
+      log('[Scout] Feed memory saved.');
+    } catch (err) {
+      log(`[Scout] Feed memory save failed (non-fatal): ${(err as Error).message}`);
+    }
+  }
+
+  /** Record a successful triage outcome for a feed. */
+  record(feedDomain: string, pillar: Pillar): void {
+    if (!this.data[feedDomain]) this.data[feedDomain] = emptyPillarCounts();
+    this.data[feedDomain][pillar]++;
+  }
+
+  /**
+   * Compute a 0–1 priority score for an item given current bucket fill levels.
+   *
+   * Formula: Σ_pillar [ historical_rate(feed, pillar) × need(pillar) ]
+   *
+   * - historical_rate is derived from empirical outcomes — no hardcoded labels.
+   * - A feed that has only ever produced gaming content scores near-zero when
+   *   the gaming bucket is full, regardless of any static mapping.
+   * - A feed with no history scores 0.5 (neutral).
+   */
+  score(feedDomain: string, buckets: Record<Pillar, ScoutItem[]>): number {
+    const counts = this.data[feedDomain];
+    if (!counts) return 0.5;
+
+    const total = PILLARS.reduce((s, p) => s + counts[p], 0);
+    if (total === 0) return 0.5;
+
+    let weighted = 0;
+    for (const pillar of PILLARS) {
+      const rate = counts[pillar] / total;
+      const need = 1 - (buckets[pillar].length / MAX_CANDIDATES_PER_PILLAR);
+      weighted += rate * need;
+    }
+    return Math.min(1, Math.max(0, weighted));
+  }
+
+  /** Human-readable summary of what each feed has historically produced. */
+  summary(): string {
+    return Object.entries(this.data)
+      .map(([domain, counts]) => {
+        const total = PILLARS.reduce((s, p) => s + counts[p], 0);
+        if (total === 0) return null;
+        const breakdown = PILLARS
+          .filter((p) => counts[p] > 0)
+          .sort((a, b) => counts[b] - counts[a])
+          .map((p) => `${p}:${counts[p]}`)
+          .join('+');
+        return `${domain}(${breakdown})`;
+      })
+      .filter(Boolean)
+      .join('  ');
+  }
 }
 
 // ── Scout class ───────────────────────────────────────────────────────────────
@@ -174,7 +217,7 @@ export class Scout {
     });
   }
 
-  // ── Triage a single item via LLM ─────────────────────────────────────────────
+  // ── LLM triage ───────────────────────────────────────────────────────────────
 
   private async triageItem(title: string, summary: string): Promise<TriageResult> {
     const prompt = `You are the **Scout Agent** for a Japanese pop-culture newsroom. Your job is to analyze raw Japanese RSS feed items, extract the core facts, and provide accurate localization notes.
@@ -228,10 +271,7 @@ Respond ONLY with the JSON object.`;
 
       const pillar = PILLAR_FROM_LABEL[result.pillar];
       if (!pillar) {
-        return {
-          status: 'PARSE_ERROR',
-          reason: `Unknown pillar label from LLM: "${result.pillar}"`,
-        };
+        return { status: 'PARSE_ERROR', reason: `Unknown pillar label: "${result.pillar}"` };
       }
 
       return {
@@ -241,58 +281,58 @@ Respond ONLY with the JSON object.`;
         translation_notes: result.translation_notes || '',
       };
     } catch (err) {
-      return {
-        status: 'PARSE_ERROR',
-        reason: `LLM/parse exception: ${(err as Error).message}`,
-      };
+      return { status: 'PARSE_ERROR', reason: `LLM/parse exception: ${(err as Error).message}` };
     }
   }
 
-  // ── Core triage loop (reused across initial run + retries) ───────────────────
+  // ── Core triage loop ─────────────────────────────────────────────────────────
 
   private async triagePool(
     pool: PoolItem[],
     buckets: Record<Pillar, ScoutItem[]>,
+    memory: FeedMemory,
     roundLabel: string
   ): Promise<void> {
     const allFull = () => PILLARS.every((p) => buckets[p].length >= MAX_CANDIDATES_PER_PILLAR);
-
-    // Mutable remaining list — re-sorted after every batch
     const remaining = [...pool];
     let batchNum = 0;
 
     while (remaining.length > 0 && !allFull()) {
-      // Re-sort by need score so underrepresented pillars bubble to the top
-      remaining.sort((a, b) => needScore(b, buckets) - needScore(a, buckets));
+      // Re-sort by empirical need score before each batch
+      remaining.sort((a, b) => memory.score(b.sourceFeed, buckets) - memory.score(a.sourceFeed, buckets));
 
       const batch = remaining.splice(0, BATCH_SIZE);
       batchNum++;
 
-      this.log(`[Scout] ${roundLabel} — Triaging batch ${batchNum} (${batch.length} items, ${remaining.length} remaining)...`);
+      this.log(
+        `[Scout] ${roundLabel} — Batch ${batchNum} (${batch.length} items, ${remaining.length} remaining)`
+      );
 
       const results = await Promise.all(
         batch.map((item) => this.triageItem(item.title, item.summary))
       );
 
-      let batchAccepted = 0, batchRejected = 0, batchErrors = 0, batchDropped = 0;
+      let accepted = 0, rejected = 0, errors = 0, dropped = 0;
 
       for (let j = 0; j < results.length; j++) {
         const result = results[j];
         const item   = batch[j];
 
         if (result.status === 'REJECTED') {
-          batchRejected++;
+          rejected++;
           this.log(`[Scout] ✗ REJECTED  — ${result.reason} | "${item.title}"`);
           continue;
         }
 
         if (result.status === 'PARSE_ERROR') {
-          batchErrors++;
+          errors++;
           this.log(`[Scout] ✗ ERROR     — ${result.reason} | "${item.title}"`);
           continue;
         }
 
-        // APPROVED
+        // APPROVED — update empirical memory regardless of bucket state
+        memory.record(item.sourceFeed, result.pillar);
+
         const bucket = buckets[result.pillar];
         if (bucket.length < MAX_CANDIDATES_PER_PILLAR) {
           bucket.push({
@@ -302,67 +342,68 @@ Respond ONLY with the JSON object.`;
             pillar:           result.pillar,
             translationNotes: result.translation_notes,
           });
-          batchAccepted++;
-          this.log(`[Scout] ✓ ACCEPTED  [${result.pillar}] (${bucket.length}/${MAX_CANDIDATES_PER_PILLAR}) | "${item.title}"`);
+          accepted++;
+          this.log(
+            `[Scout] ✓ ACCEPTED  [${result.pillar}] (${bucket.length}/${MAX_CANDIDATES_PER_PILLAR}) ` +
+            `[${item.sourceFeed}] | "${item.title}"`
+          );
         } else {
-          batchDropped++;
-          this.log(`[Scout] ~ BUCKET FULL [${result.pillar}] — low-priority fallback discarded | "${item.title}"`);
+          dropped++;
+          this.log(`[Scout] ~ FULL [${result.pillar}] [${item.sourceFeed}] | "${item.title}"`);
         }
       }
 
-      const bucketSummary = PILLARS.map(
-        (p) => `${p}:${buckets[p].length}/${MAX_CANDIDATES_PER_PILLAR}`
-      ).join('  ');
+      const state = PILLARS.map((p) => `${p}:${buckets[p].length}`).join('  ');
       this.log(
-        `[Scout] Batch ${batchNum} done — ` +
-        `✓${batchAccepted} ✗${batchRejected} err:${batchErrors} drop:${batchDropped} | ${bucketSummary}`
+        `[Scout] Batch ${batchNum} — ✓${accepted} ✗${rejected} err:${errors} drop:${dropped} | ${state}`
       );
     }
   }
 
-  // ── Build a deduplicated pool from feeds with given age limit ─────────────────
+  // ── Build deduplicated pool ───────────────────────────────────────────────────
 
   private async buildPool(
     ageDays: number,
     rejectedUrls: Set<string>,
     seenInRun: Set<string>
   ): Promise<PoolItem[]> {
-    const rawItems = await fetchPillarFeeds('anime'); // fetches all PRIORITY_FEEDS
+    const rawItems = await fetchPillarFeeds('anime');
 
-    // Sort freshest first
     const sorted = [...rawItems].sort((a, b) => {
       const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
       const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
       return tb - ta;
     });
 
-    // Age filter
     const cutoff = Date.now() - ageDays * 24 * 60 * 60 * 1000;
-    const aged = sorted.filter((item) => {
-      if (!item.pubDate) return true;
-      return new Date(item.pubDate).getTime() >= cutoff;
-    });
+    const aged = sorted.filter((item) =>
+      !item.pubDate || new Date(item.pubDate).getTime() >= cutoff
+    );
+
     const dropped = sorted.length - aged.length;
     if (dropped > 0) {
-      this.log(`[Scout] Age filter (${ageDays}d): dropped ${dropped} stale items (${aged.length} remain)`);
+      this.log(`[Scout] Age filter (${ageDays}d): ${dropped} stale items removed (${aged.length} remain)`);
     }
 
-    // Dedup: skip already-processed URLs and anything seen in this run
     const unprocessed: PoolItem[] = [];
     for (const item of aged) {
       if (rejectedUrls.has(item.link)) continue;
       if (seenInRun.has(item.link)) continue;
       const seen = await this.isProcessed(item.link);
       if (seen) {
-        this.log(`[Scout] Skipping already-processed: ${item.link}`);
         seenInRun.add(item.link);
         continue;
       }
       seenInRun.add(item.link);
-      unprocessed.push(item);
+      unprocessed.push({
+        title:      item.title,
+        link:       item.link,
+        summary:    item.summary,
+        pubDate:    item.pubDate,
+        sourceFeed: item.sourceFeed,
+      });
     }
 
-    // Anti-dominance shuffle on top N
     const topFresh = unprocessed.slice(0, FRESH_POOL_SIZE);
     const rest     = unprocessed.slice(FRESH_POOL_SIZE);
     return [...shuffle(topFresh), ...rest];
@@ -373,56 +414,68 @@ Respond ONLY with the JSON object.`;
   async run(rejectedUrls: Set<string> = new Set()): Promise<ScoutItem[]> {
     this.log('[Scout] Starting Freshness & Parallel Scatter run...');
 
+    const memory = new FeedMemory();
+    await memory.load(this.log);
+
+    const memSummary = memory.summary();
+    if (memSummary) {
+      this.log(`[Scout] Historical feed memory: ${memSummary}`);
+    }
+
     const buckets: Record<Pillar, ScoutItem[]> = {
       anime: [], gaming: [], infotainment: [], manga: [], toys: [],
     };
-
-    // Tracks every URL we've evaluated this run so retries don't re-evaluate them
     const seenInRun = new Set<string>();
 
-    // ── Initial pass (7-day window) ───────────────────────────────────────────
-    this.log(`[Scout] Phase 1-3: Building fresh pool (${AGE_LIMIT_DAYS}-day window)...`);
+    // ── Initial pass ──────────────────────────────────────────────────────────
+    this.log(`[Scout] Building pool (${AGE_LIMIT_DAYS}-day window)...`);
     const initialPool = await this.buildPool(AGE_LIMIT_DAYS, rejectedUrls, seenInRun);
 
     if (initialPool.length === 0) {
       this.log('[Scout] No new items found in feeds.');
+      await memory.save(this.log);
       return [];
     }
-    this.log(`[Scout] Pool ready: ${initialPool.length} items. Starting triage...`);
-    await this.triagePool(initialPool, buckets, 'Round 1');
 
-    // ── Underquota retry loop ─────────────────────────────────────────────────
+    this.log(`[Scout] Pool: ${initialPool.length} items. Starting triage...`);
+    await this.triagePool(initialPool, buckets, memory, 'Round 1');
+
+    // ── Underquota retries ────────────────────────────────────────────────────
     for (let retry = 1; retry <= MAX_RETRY_ROUNDS; retry++) {
-      const underquota = PILLARS.filter((p) => buckets[p].length < TARGET_PER_PILLAR);
-      if (underquota.length === 0) break;
+      const under = PILLARS.filter((p) => buckets[p].length < TARGET_PER_PILLAR);
+      if (under.length === 0) break;
 
       this.log(
-        `[Scout] ⚠ Underquota after round ${retry}: ${underquota.map((p) => `${PILLAR_LABELS[p]}(${buckets[p].length}/${TARGET_PER_PILLAR})`).join(', ')} — retrying with ${AGE_RETRY_DAYS}-day window...`
+        `[Scout] ⚠ Underquota after round ${retry}: ` +
+        under.map((p) => `${PILLAR_LABELS[p]}(${buckets[p].length}/${TARGET_PER_PILLAR})`).join(', ') +
+        ` — retrying with ${AGE_RETRY_DAYS}-day window...`
       );
 
       const retryPool = await this.buildPool(AGE_RETRY_DAYS, rejectedUrls, seenInRun);
       if (retryPool.length === 0) {
-        this.log(`[Scout] Retry ${retry}: No additional items found. Stopping.`);
+        this.log(`[Scout] Retry ${retry}: no additional items found.`);
         break;
       }
-      this.log(`[Scout] Retry ${retry}: ${retryPool.length} additional items available.`);
-      await this.triagePool(retryPool, buckets, `Retry ${retry}`);
+      this.log(`[Scout] Retry ${retry}: ${retryPool.length} additional items.`);
+      await this.triagePool(retryPool, buckets, memory, `Retry ${retry}`);
     }
+
+    // ── Save updated memory ───────────────────────────────────────────────────
+    await memory.save(this.log);
 
     // ── Final summary ─────────────────────────────────────────────────────────
     const selected: ScoutItem[] = [];
     for (const pillar of PILLARS) {
-      for (const item of buckets[pillar]) {
-        selected.push(item);
-      }
+      selected.push(...buckets[pillar]);
       if (buckets[pillar].length < TARGET_PER_PILLAR) {
         this.log(
-          `[Scout] ⚠ Final underquota: ${buckets[pillar].length}/${TARGET_PER_PILLAR} for ${PILLAR_LABELS[pillar]} — pool exhausted`
+          `[Scout] ⚠ Final underquota: ${buckets[pillar].length}/${TARGET_PER_PILLAR} for ${PILLAR_LABELS[pillar]}`
         );
       }
     }
 
-    this.log(`[Scout] Triage complete. ${selected.length} candidates across ${PILLARS.length} pillars.`);
+    this.log(`[Scout] Complete — ${selected.length} candidates across ${PILLARS.length} pillars.`);
+    this.log(`[Scout] Updated feed memory: ${memory.summary()}`);
     return selected;
   }
 }

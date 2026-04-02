@@ -14,6 +14,7 @@ export interface RssItem {
   summary: string;
   pubDate?: string;
   pillar: Pillar;
+  sourceFeed: string; // hostname of the feed URL this item came from
 }
 
 /**
@@ -79,6 +80,9 @@ function extractFromMastodonDescription(
 }
 
 export async function fetchFeed(url: string, pillar: Pillar): Promise<RssItem[]> {
+  let sourceFeed = url;
+  try { sourceFeed = new URL(url).hostname; } catch { /* keep raw url */ }
+
   try {
     const feed = await parser.parseURL(url);
     const isMastodonFeed = url.includes('hostdon.jp') || url.includes('mastodon');
@@ -92,13 +96,7 @@ export async function fetchFeed(url: string, pillar: Pillar): Promise<RssItem[]>
         if (isMastodonFeed && !item.title) {
           const html = item.content || item.summary || item['content:encoded'] || '';
           const { title, link } = extractFromMastodonDescription(html, rawLink);
-          return {
-            title,
-            link,
-            summary: title,
-            pubDate: item.pubDate,
-            pillar,
-          };
+          return { title, link, summary: title, pubDate: item.pubDate, pillar, sourceFeed };
         }
 
         if (!item.title) return null;
@@ -108,6 +106,7 @@ export async function fetchFeed(url: string, pillar: Pillar): Promise<RssItem[]>
           summary: item.contentSnippet || item.summary || item.content || '',
           pubDate: item.pubDate,
           pillar,
+          sourceFeed,
         };
       })
       .filter((item): item is NonNullable<typeof item> => item !== null && item.title.length > 0 && item.link.length > 0) as RssItem[];
