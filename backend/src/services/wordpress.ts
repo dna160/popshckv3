@@ -54,6 +54,9 @@ function getApiBase(): string {
 
 /**
  * Upload a remote image to WordPress media library by URL.
+ * Step 1: POST the binary to /media (sets the file).
+ * Step 2: PATCH /media/{id} to set alt_text and title (WP REST API
+ *         does not accept these fields during binary upload).
  * Returns the WordPress media ID and URL.
  */
 export async function uploadImageFromUrl(
@@ -63,7 +66,7 @@ export async function uploadImageFromUrl(
   const apiBase = getApiBase();
   const auth = getAuthHeader();
 
-  // First, download the image
+  // ── Step 1: download the source image ───────────────────────────────────
   const imgResponse = await fetch(imageUrl);
   if (!imgResponse.ok) {
     throw new Error(`Failed to download image from ${imageUrl}: ${imgResponse.status}`);
@@ -71,16 +74,18 @@ export async function uploadImageFromUrl(
 
   const imageBuffer = await imgResponse.arrayBuffer();
   const contentType = imgResponse.headers.get('content-type') || 'image/jpeg';
-  const ext = contentType.includes('png') ? 'png' : 'jpg';
+  const ext = contentType.includes('png') ? 'png' :
+               contentType.includes('gif') ? 'gif' :
+               contentType.includes('webp') ? 'webp' : 'jpg';
   const filename = `article-image-${Date.now()}.${ext}`;
 
+  // ── Step 2: upload binary to WP media library ────────────────────────────
   const uploadResponse = await fetch(`${apiBase}/media`, {
     method: 'POST',
     headers: {
       Authorization: auth,
       'Content-Disposition': `attachment; filename="${filename}"`,
       'Content-Type': contentType,
-      'alt-text': altText,
     },
     body: imageBuffer,
   });
@@ -90,7 +95,29 @@ export async function uploadImageFromUrl(
     throw new Error(`WordPress media upload failed: ${uploadResponse.status} - ${text}`);
   }
 
-  return (await uploadResponse.json()) as WpMediaResponse;
+  const media = (await uploadResponse.json()) as WpMediaResponse;
+
+  // ── Step 3: PATCH to set alt_text and title (binary upload ignores these) ─
+  try {
+    const patchResponse = await fetch(`${apiBase}/media/${media.id}`, {
+      method: 'POST', // WP REST API uses POST (not PATCH) for updates
+      headers: {
+        Authorization: auth,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        alt_text: altText,
+        title: altText,
+      }),
+    });
+    if (!patchResponse.ok) {
+      console.warn(`[WordPress] Could not set alt_text for media ${media.id}: ${patchResponse.status}`);
+    }
+  } catch (err) {
+    console.warn(`[WordPress] alt_text patch failed for media ${media.id}:`, (err as Error).message);
+  }
+
+  return media;
 }
 
 /**
@@ -144,8 +171,11 @@ export async function publishArticle(
         wpUrl: media.source_url,
         wpId: media.id,
       });
+      // Mark as featured if flagged, or fall back to the first successfully uploaded image
       if (img.isFeatured) {
         featuredMediaId = media.id;
+      } else if (featuredMediaId === undefined) {
+        featuredMediaId = media.id; // first-upload fallback; overridden if a flagged image succeeds
       }
     } catch (err) {
       console.warn(`[WordPress] Failed to upload image ${img.url}:`, (err as Error).message);
