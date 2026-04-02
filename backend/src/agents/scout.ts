@@ -291,6 +291,7 @@ Respond ONLY with the JSON object.`;
     pool: PoolItem[],
     buckets: Record<Pillar, ScoutItem[]>,
     memory: FeedMemory,
+    triagedUrls: Set<string>,  // populated here so retries skip already-triaged items
     roundLabel: string
   ): Promise<void> {
     const allFull = () => PILLARS.every((p) => buckets[p].length >= MAX_CANDIDATES_PER_PILLAR);
@@ -307,6 +308,10 @@ Respond ONLY with the JSON object.`;
       this.log(
         `[Scout] ${roundLabel} — Batch ${batchNum} (${batch.length} items, ${remaining.length} remaining)`
       );
+
+      // Mark all batch items as triaged BEFORE the LLM call so retries
+      // never re-evaluate the same URL regardless of outcome
+      for (const item of batch) triagedUrls.add(item.link);
 
       const results = await Promise.all(
         batch.map((item) => this.triageItem(item.title, item.summary))
@@ -365,7 +370,7 @@ Respond ONLY with the JSON object.`;
   private async buildPool(
     ageDays: number,
     rejectedUrls: Set<string>,
-    seenInRun: Set<string>
+    triagedUrls: Set<string>  // only skip items already sent to the LLM this run
   ): Promise<PoolItem[]> {
     const rawItems = await fetchPillarFeeds('anime');
 
@@ -388,13 +393,9 @@ Respond ONLY with the JSON object.`;
     const unprocessed: PoolItem[] = [];
     for (const item of aged) {
       if (rejectedUrls.has(item.link)) continue;
-      if (seenInRun.has(item.link)) continue;
+      if (triagedUrls.has(item.link)) continue; // already evaluated this run — skip
       const seen = await this.isProcessed(item.link);
-      if (seen) {
-        seenInRun.add(item.link);
-        continue;
-      }
-      seenInRun.add(item.link);
+      if (seen) continue;
       unprocessed.push({
         title:      item.title,
         link:       item.link,
@@ -425,11 +426,14 @@ Respond ONLY with the JSON object.`;
     const buckets: Record<Pillar, ScoutItem[]> = {
       anime: [], gaming: [], infotainment: [], manga: [], toys: [],
     };
-    const seenInRun = new Set<string>();
+    // Only URLs actually sent to the LLM are tracked here.
+    // Items fetched but never triaged (e.g. because a bucket filled mid-batch)
+    // are NOT marked, so they remain available for the next round.
+    const triagedUrls = new Set<string>();
 
     // ── Initial pass ──────────────────────────────────────────────────────────
     this.log(`[Scout] Building pool (${AGE_LIMIT_DAYS}-day window)...`);
-    const initialPool = await this.buildPool(AGE_LIMIT_DAYS, rejectedUrls, seenInRun);
+    const initialPool = await this.buildPool(AGE_LIMIT_DAYS, rejectedUrls, triagedUrls);
 
     if (initialPool.length === 0) {
       this.log('[Scout] No new items found in feeds.');
@@ -438,26 +442,46 @@ Respond ONLY with the JSON object.`;
     }
 
     this.log(`[Scout] Pool: ${initialPool.length} items. Starting triage...`);
-    await this.triagePool(initialPool, buckets, memory, 'Round 1');
+    await this.triagePool(initialPool, buckets, memory, triagedUrls, 'Round 1');
 
-    // ── Underquota retries ────────────────────────────────────────────────────
-    for (let retry = 1; retry <= MAX_RETRY_ROUNDS; retry++) {
+    // ── Retry loop: keep going until quota met or feeds truly exhausted ───────
+    // Stops only when:
+    //   (a) all pillar buckets reach TARGET_PER_PILLAR, OR
+    //   (b) MAX_EMPTY_ROUNDS consecutive fetches yield zero new items
+    const MAX_EMPTY_ROUNDS = 3;
+    let emptyRounds  = 0;
+    let retryRound   = 1;
+
+    while (true) {
       const under = PILLARS.filter((p) => buckets[p].length < TARGET_PER_PILLAR);
-      if (under.length === 0) break;
+      if (under.length === 0) break; // ✓ all quotas met
 
-      this.log(
-        `[Scout] ⚠ Underquota after round ${retry}: ` +
-        under.map((p) => `${PILLAR_LABELS[p]}(${buckets[p].length}/${TARGET_PER_PILLAR})`).join(', ') +
-        ` — retrying with ${AGE_RETRY_DAYS}-day window...`
-      );
+      const missing = under
+        .map((p) => `${PILLAR_LABELS[p]}(${TARGET_PER_PILLAR - buckets[p].length} needed)`)
+        .join(', ');
+      this.log(`[Scout] ⚠ Underquota: ${missing} — re-fetching feeds (round ${retryRound})...`);
 
-      const retryPool = await this.buildPool(AGE_RETRY_DAYS, rejectedUrls, seenInRun);
+      // Expand age window after first retry to widen the candidate pool
+      const ageDays = retryRound === 1 ? AGE_LIMIT_DAYS : AGE_RETRY_DAYS;
+      const retryPool = await this.buildPool(ageDays, rejectedUrls, triagedUrls);
+
       if (retryPool.length === 0) {
-        this.log(`[Scout] Retry ${retry}: no additional items found.`);
-        break;
+        emptyRounds++;
+        this.log(
+          `[Scout] Retry ${retryRound}: no new items in feeds ` +
+          `(${emptyRounds}/${MAX_EMPTY_ROUNDS} empty rounds).`
+        );
+        if (emptyRounds >= MAX_EMPTY_ROUNDS) {
+          this.log('[Scout] Feeds exhausted after consecutive empty rounds — proceeding with partial quota.');
+          break;
+        }
+      } else {
+        emptyRounds = 0; // reset on any successful fetch
+        this.log(`[Scout] Retry ${retryRound}: ${retryPool.length} new items found. Continuing triage...`);
+        await this.triagePool(retryPool, buckets, memory, triagedUrls, `Retry ${retryRound}`);
       }
-      this.log(`[Scout] Retry ${retry}: ${retryPool.length} additional items.`);
-      await this.triagePool(retryPool, buckets, memory, `Retry ${retry}`);
+
+      retryRound++;
     }
 
     // ── Save updated memory ───────────────────────────────────────────────────
