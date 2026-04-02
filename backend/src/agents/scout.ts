@@ -101,30 +101,37 @@ Respond with ONLY "YES" if clearly relevant, or "NO" if not relevant or ambiguou
     this.log(`[Scout] Fetching candidates for pillar: ${PILLAR_LABELS[pillar]}`);
 
     const items = await fetchPillarFeeds(pillar);
-    const selected: ScoutItem[] = [];
 
-    for (const item of items) {
-      if (selected.length >= needed) break;
-      if (rejectedUrls.has(item.link)) continue;
+    // Evaluate all candidates in parallel — DB checks + LLM triage fire simultaneously
+    const candidates = items.filter((item) => !rejectedUrls.has(item.link));
 
-      const alreadyProcessed = await this.isProcessed(item.link);
-      if (alreadyProcessed) {
-        this.log(`[Scout] Skipping already-processed: ${item.link}`);
-        continue;
-      }
+    const evaluated = await Promise.all(
+      candidates.map(async (item) => {
+        const alreadyProcessed = await this.isProcessed(item.link);
+        if (alreadyProcessed) {
+          this.log(`[Scout] Skipping already-processed: ${item.link}`);
+          return null;
+        }
+        const relevant = await this.evaluateTopicRelevance(item.title, item.summary, pillar);
+        if (!relevant) {
+          this.log(`[Scout] Rejected irrelevant topic: "${item.title}"`);
+          return null;
+        }
+        return item;
+      })
+    );
 
-      const relevant = await this.evaluateTopicRelevance(item.title, item.summary, pillar);
-      if (!relevant) {
-        this.log(`[Scout] Rejected irrelevant topic: "${item.title}"`);
-        continue;
-      }
-
-      selected.push({
+    const selected: ScoutItem[] = evaluated
+      .filter((item): item is NonNullable<typeof item> => item !== null)
+      .slice(0, needed)
+      .map((item) => ({
         title: item.title,
         link: item.link,
         summary: item.summary,
         pillar,
-      });
+      }));
+
+    for (const item of selected) {
       this.log(`[Scout] Selected: "${item.title}" [${pillar}]`);
     }
 

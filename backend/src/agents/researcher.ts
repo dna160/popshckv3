@@ -113,19 +113,26 @@ Respond in JSON format:
       try {
         const images = await searchImages(query, 15);
 
-        for (const img of images) {
+        // Filter to unseen, valid URLs, then evaluate all in parallel
+        const candidates = images.filter(
+          (img) => img.imageUrl.startsWith('http') && !triedUrls.has(img.imageUrl)
+        );
+        for (const img of candidates) triedUrls.add(img.imageUrl);
+
+        const results = await Promise.all(
+          candidates.map(async (img) => ({
+            img,
+            isRelevant: await evaluateImageRelevance(img.imageUrl, title, PILLAR_LABELS[pillar]),
+          }))
+        );
+
+        for (const { img, isRelevant } of results) {
           if (approved.length >= REQUIRED_IMAGES) break;
-          if (triedUrls.has(img.imageUrl)) continue;
-          if (!img.imageUrl.startsWith('http')) continue;
-
-          triedUrls.add(img.imageUrl);
-
-          const isRelevant = await evaluateImageRelevance(img.imageUrl, title, PILLAR_LABELS[pillar]);
           if (isRelevant) {
             approved.push({
               url: img.imageUrl,
               alt: img.title || `${PILLAR_LABELS[pillar]} - ${title}`,
-              isFeatured: approved.length === 0, // First approved image is featured
+              isFeatured: approved.length === 0,
               sourceQuery: query,
             });
             this.log(`[Researcher] Approved image ${approved.length}/${REQUIRED_IMAGES}: ${img.imageUrl}`);
@@ -186,18 +193,18 @@ Respond in JSON format:
     approved: ResearchedItem[];
     rejected: ScoutItem[];
   }> {
-    this.log(`[Researcher] Beginning research on ${items.length} articles...`);
+    this.log(`[Researcher] Beginning research on ${items.length} articles in parallel...`);
+
+    const results = await Promise.all(items.map((item) => this.researchItem(item)));
 
     const approved: ResearchedItem[] = [];
     const rejected: ScoutItem[] = [];
 
-    // Research items sequentially to avoid rate limits
-    for (const item of items) {
-      const result = await this.researchItem(item);
-      if (result.approved) {
-        approved.push(result);
+    for (let i = 0; i < results.length; i++) {
+      if (results[i].approved) {
+        approved.push(results[i]);
       } else {
-        rejected.push(item);
+        rejected.push(items[i]);
       }
     }
 

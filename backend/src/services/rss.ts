@@ -75,23 +75,18 @@ export async function fetchFeed(url: string, pillar: Pillar): Promise<RssItem[]>
 
 /**
  * Fetch all feeds for a given pillar.
- * Priority Japanese feeds are fetched first (shared across all pillars);
- * pillar-specific fallback feeds are appended afterward.
+ * Only the priority Japanese feeds are used — no fallbacks.
  * The Scout's LLM triage filters items to the correct pillar.
  */
 export async function fetchPillarFeeds(pillar: Pillar): Promise<RssItem[]> {
-  const priorityResults = await Promise.allSettled(
+  const results = await Promise.allSettled(
     PRIORITY_FEEDS.map((url) => fetchFeed(url, pillar))
-  );
-  const fallbackResults = await Promise.allSettled(
-    RSS_FEEDS[pillar].map((url) => fetchFeed(url, pillar))
   );
 
   const allItems: RssItem[] = [];
   const seenLinks = new Set<string>();
 
-  // Priority feeds first
-  for (const result of [...priorityResults, ...fallbackResults]) {
+  for (const result of results) {
     if (result.status === 'fulfilled') {
       for (const item of result.value) {
         if (!seenLinks.has(item.link)) {

@@ -19,6 +19,56 @@ export interface ChatMessage {
   content: string | OpenAI.ChatCompletionContentPart[];
 }
 
+// ── Rate limiter: 900 requests per minute (sliding window) ────────────────────
+
+class RateLimiter {
+  private queue: Array<() => void> = [];
+  private timestamps: number[] = [];
+  private readonly maxPerMinute: number;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(maxPerMinute: number) {
+    this.maxPerMinute = maxPerMinute;
+  }
+
+  acquire(): Promise<void> {
+    return new Promise((resolve) => {
+      this.queue.push(resolve);
+      this.process();
+    });
+  }
+
+  private process(): void {
+    if (this.queue.length === 0) return;
+
+    const now = Date.now();
+    const windowStart = now - 60_000;
+    this.timestamps = this.timestamps.filter((t) => t > windowStart);
+
+    if (this.timestamps.length < this.maxPerMinute) {
+      const resolve = this.queue.shift()!;
+      this.timestamps.push(Date.now());
+      resolve();
+      if (this.queue.length > 0) {
+        setImmediate(() => this.process());
+      }
+    } else {
+      // Wait until the oldest timestamp exits the 60s window
+      const waitMs = this.timestamps[0] - windowStart + 1;
+      if (!this.timer) {
+        this.timer = setTimeout(() => {
+          this.timer = null;
+          this.process();
+        }, waitMs);
+      }
+    }
+  }
+}
+
+const rateLimiter = new RateLimiter(900);
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * Send a chat completion request to Grok via xAI API.
  */
@@ -26,6 +76,7 @@ export async function chat(
   messages: ChatMessage[],
   opts: { temperature?: number; maxTokens?: number } = {}
 ): Promise<string> {
+  await rateLimiter.acquire();
   const response = await llmClient.chat.completions.create({
     model: MODEL,
     messages: messages as OpenAI.ChatCompletionMessageParam[],
@@ -50,6 +101,7 @@ export async function evaluateImageRelevance(
   pillar: string
 ): Promise<boolean> {
   try {
+    await rateLimiter.acquire();
     const response = await llmClient.chat.completions.create({
       model: MODEL,
       messages: [

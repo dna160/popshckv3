@@ -369,29 +369,23 @@ export class Pipeline {
         'Pipeline'
       );
 
-      // Phase 2: Process each approved article through Copywriter → Editor loop
-      for (const item of approvedItems) {
-        this.checkAbort();
-        // Create DB record
-        const articleId = await this.createArticleRecord(item);
-
-        // Mark source URL as processed
-        await this.scout.markProcessed(item.link);
-
-        this.addLog(`Processing article: "${item.title}" [${item.pillar}]`, 'info', 'Pipeline');
-
-        const finalStatus = await this.processArticle(articleId, item);
-        articlesProcessed++;
-
-        this.addLog(
-          `Completed article "${item.title}". Final status: ${finalStatus}`,
-          'info',
-          'Pipeline'
-        );
-
-        // Persist logs after each article
-        await this.persistLogs();
-      }
+      // Phase 2: Process all approved articles in parallel through Copywriter → Editor loop
+      await Promise.all(
+        approvedItems.map(async (item) => {
+          this.checkAbort();
+          const articleId = await this.createArticleRecord(item);
+          await this.scout.markProcessed(item.link);
+          this.addLog(`Processing article: "${item.title}" [${item.pillar}]`, 'info', 'Pipeline');
+          const finalStatus = await this.processArticle(articleId, item);
+          articlesProcessed++;
+          this.addLog(
+            `Completed article "${item.title}". Final status: ${finalStatus}`,
+            'info',
+            'Pipeline'
+          );
+          await this.persistLogs();
+        })
+      );
 
       // Mark pipeline run as completed
       await this.prisma.pipelineRun.update({

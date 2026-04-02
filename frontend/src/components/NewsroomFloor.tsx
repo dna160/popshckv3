@@ -80,10 +80,19 @@ const LogModal: React.FC<LogModalProps> = ({ logs, isRunning, onClose }) => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs.length]);
 
+  useEffect(() => {
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [onClose]);
+
   return (
     <div
       className="fixed inset-0 z-50 flex flex-col bg-newsroom-bg/95 backdrop-blur-sm"
       style={{ fontFamily: 'monospace' }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 border-b border-newsroom-border shrink-0">
@@ -96,10 +105,10 @@ const LogModal: React.FC<LogModalProps> = ({ logs, isRunning, onClose }) => {
         </div>
         <button
           onClick={onClose}
-          className="text-newsroom-subtle hover:text-newsroom-text text-lg leading-none"
+          className="text-newsroom-text hover:text-white bg-newsroom-muted hover:bg-newsroom-red/60 border border-newsroom-border rounded px-2 py-1 text-xs font-mono transition-colors"
           aria-label="Close log viewer"
         >
-          ✕
+          ✕ Close
         </button>
       </div>
 
