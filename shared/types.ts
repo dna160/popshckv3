@@ -76,6 +76,7 @@ export interface ScoutItem {
   summary: string;
   pillar: Pillar;
   rawContent?: string;
+  translationNotes?: string;
 }
 
 export interface ResearchedItem extends ScoutItem {

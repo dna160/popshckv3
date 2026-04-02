@@ -42,6 +42,10 @@ export class Copywriter {
       ? `\n[Extracted Facts]:\n${item.facts.map((f, i) => `${i + 1}. ${f}`).join('\n')}`
       : '\n[Extracted Facts]: (No additional facts provided — base the article on the title and source only.)';
 
+    const translationBlock = item.translationNotes
+      ? `\n[Translation Notes]:\n${item.translationNotes}`
+      : '';
+
     const imagesBlock = item.images.length > 0
       ? `\n[Images]:\n${item.images.map((img, i) => `Image ${i + 1}: ${img.url}\nDescription: ${img.alt}`).join('\n')}`
       : '';
@@ -53,7 +57,7 @@ export class Copywriter {
     const prompt = `You are the **Master Copywriter Agent** for a premium Japanese pop-culture news portal. Your job is to weave raw facts into engaging, high-quality news articles.
 
 *** CRITICAL LANGUAGE DIRECTIVE ***
-Although these instructions are in English, **THE FINAL ARTICLE MUST BE WRITTEN ENTIRELY IN NATURAL, FLUENT INDONESIAN (Bahasa Indonesia) INCLUDING THE HEADLINE.** Do not sound like a robotic translation. Write like a native Indonesian pop-culture journalist. Do not output English text unless it is a proper noun, title, or Markdown syntax.
+Although these instructions are in English, **THE FINAL ARTICLE MUST BE WRITTEN ENTIRELY IN NATURAL, FLUENT INDONESIAN (Bahasa Indonesia), INCLUDING THE HEADLINE.** Do not sound like a robotic translation. Write like a native Indonesian pop-culture journalist. Do not output English text unless it is a proper noun, title, or Markdown syntax.
 
 **INPUTS:**
 
@@ -62,21 +66,24 @@ Although these instructions are in English, **THE FINAL ARTICLE MUST BE WRITTEN 
 [Title]: "${item.title}"
 [Source]: ${item.link}
 ${factsBlock}
+${translationBlock}
 ${imagesBlock}
 ${feedbackBlock}
 
 **STRICT WRITING RULES:**
-1. **Word Count:** The article MUST be between ${MIN_WORDS} and ${MAX_WORDS} words.
-2. **Anti-Hallucination:** DO NOT invent facts, dates, names, or quotes that are not in the [Extracted Facts]. Expand the prose to be engaging, but keep the substance 100% accurate to the source.
-3. **Format:** Use pure Markdown (Headings, *italic*, **bold**). Do not include conversational filler (e.g., do not write "Here is your article:").
+1. **Headline:** You MUST write a catchy headline in Bahasa Indonesia at the top of the article using an H1 Markdown tag (\`# Headline\`).
+2. **Word Count:** The body of the article MUST be between ${MIN_WORDS} and ${MAX_WORDS} words.
+3. **Anti-Hallucination:** DO NOT invent facts, dates, names, or quotes that are not in the [Extracted Facts]. Expand the prose to be engaging, but keep the substance 100% accurate to the source.
+4. **Format:** Use pure Markdown. Do not include conversational filler (e.g., do not write "Here is your article:").
+5. **Translation Notes:** You MUST use the proper Romaji/English names from [Translation Notes] instead of translating Japanese characters literally.
 
 **IMAGE PLACEMENT RULES:**
 You must insert all three images into the article using the standard Markdown format: \`![alt text](URL)\`.
-- **Image 1 (Mandatory):** Place this at the absolute top of the article, before the first paragraph. The alt-text MUST be exactly \`featured\`. Example: \`![featured](IMAGE_1_URL)\`
+- **Image 1 (Mandatory):** Place this directly beneath your H1 Headline, before the first paragraph. The alt-text MUST be exactly \`featured\`. Example: \`![featured](IMAGE_1_URL)\`
 - **Image 2 & Image 3:** Insert these intelligently within the body of the article (e.g., after a new heading or relevant paragraph). Use descriptive Indonesian alt-text based on the image context.
 
 **TONE GUIDELINES BASED ON [Content Pillar]:**
-- **Japanese Anime:** Enthusiastic and hype-focused. Celebrate the creators/studios. Use casual, welcoming greetings typical of Indonesian anime communities (e.g., "Mina-san").
+- **Japanese Anime:** Enthusiastic and hype-focused. Celebrate the creators/studios. Use casual, welcoming greetings typical of Indonesian anime communities.
 - **Japanese Gaming:** Casual, fun, and accessible. Highlight gameplay features, community updates, or release news using familiar Indonesian gamer terminology.
 - **Japanese Infotainment:** Journalistic, factual, straightforward, and professional. Best for cultural news, trends, or serious topics.
 - **Japanese Manga:** Slightly literary and analytical. Focus on storytelling appreciation, art quality, and publishing industry news.

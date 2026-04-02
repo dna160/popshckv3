@@ -2,19 +2,35 @@
  * Agent 1: RSS Feeder & Triage (The Scout)
  *
  * Responsibilities:
- * - Poll RSS feeds for all 5 pillars
+ * - Poll all priority RSS feeds (mixed-topic sources)
+ * - Dynamically categorize each item into one of the 5 pillars
+ * - Extract localization/translation notes for proper nouns
  * - Deduplicate against ProcessedUrl DB table
  * - Select exactly 2 articles per pillar (10 total per run)
- * - Return candidate items for the Researcher
  */
 
 import { PrismaClient } from '@prisma/client';
 import { fetchPillarFeeds } from '../services/rss';
-import { chat } from '../services/llm';
+import { chat, parseJsonResponse } from '../services/llm';
 import type { Pillar, ScoutItem } from '../../../shared/types';
 import { PILLARS, PILLAR_LABELS } from '../../../shared/types';
 
 const ARTICLES_PER_PILLAR = 2;
+
+const PILLAR_FROM_LABEL: Record<string, Pillar> = {
+  'Japanese Anime': 'anime',
+  'Japanese Gaming': 'gaming',
+  'Japanese Infotainment': 'infotainment',
+  'Japanese Manga': 'manga',
+  'Japanese Toys/Collectibles': 'toys',
+};
+
+interface TriageResult {
+  status: 'APPROVED' | 'REJECTED';
+  pillar: Pillar;
+  extracted_facts: string;
+  translation_notes: string;
+}
 
 export class Scout {
   private prisma: PrismaClient;
@@ -45,129 +61,155 @@ export class Scout {
   }
 
   /**
-   * Use Grok to evaluate whether an RSS item belongs to the given pillar.
-   * Returns true if the topic is relevant.
+   * Triage a single RSS item using the Scout Agent prompt.
+   * Dynamically assigns pillar, extracts facts, and provides translation notes.
+   * Returns null if the item is REJECTED or unparseable.
    */
-  private async evaluateTopicRelevance(
-    title: string,
-    summary: string,
-    pillar: Pillar
-  ): Promise<boolean> {
-    const pillarLabel = PILLAR_LABELS[pillar];
-    const prompt = `You are a content triage specialist for a Japanese pop-culture newsroom.
+  private async triageItem(title: string, summary: string): Promise<TriageResult | null> {
+    const prompt = `You are the **Scout Agent** for a Japanese pop-culture newsroom. Your job is to analyze raw Japanese RSS feed items, extract the core facts, and provide accurate localization notes.
 
-Evaluate whether the following article topic belongs to the "${pillarLabel}" content pillar.
+**INSTRUCTIONS:**
+1. **Dynamic Categorization:** Read the raw RSS content and classify it into EXACTLY ONE of the following 5 pillars:
+   - Japanese Anime
+   - Japanese Gaming
+   - Japanese Infotainment
+   - Japanese Manga
+   - Japanese Toys/Collectibles
+   *(If the article does not fit any of these, mark it as "REJECTED").*
 
-Article Title: "${title}"
-Article Summary: "${summary}"
+2. **Fact Extraction:** Extract the who, what, when, where, and why of the news.
 
-The "${pillarLabel}" pillar covers: ${this.pillarDescription(pillar)}
+3. **CRITICAL LOCALIZATION RULE:** Do NOT use literal translations for Japanese proper nouns (character names, game titles, anime titles, studio names). You must research or infer their official English localized names or standard Romaji.
+   - *Example:* Do not translate [ネル ～コールサインダブルオー～] literally. Research it and provide the proper name: "Neru".
 
-Respond with ONLY "YES" if clearly relevant, or "NO" if not relevant or ambiguous.`;
+4. **Output Format:** Provide a section called \`[Translation Notes]\` explicitly listing the correct Romaji/English names for all key entities found in the article.
+
+**RSS ITEM TO ANALYZE:**
+Title: "${title}"
+Summary: "${summary}"
+
+**EXPECTED OUTPUT JSON:**
+{
+  "status": "APPROVED" | "REJECTED",
+  "pillar": "Selected Pillar",
+  "extracted_facts": "...",
+  "translation_notes": "- ネル = Neru\\n- ..."
+}
+
+Respond ONLY with the JSON object.`;
 
     try {
-      const response = await chat(
+      const raw = await chat(
         [{ role: 'user', content: prompt }],
-        { temperature: 0, maxTokens: 10 }
+        { temperature: 0, maxTokens: 400 }
       );
-      return response.trim().toUpperCase() === 'YES';
-    } catch (err) {
-      this.log(`[Scout] LLM triage failed for "${title}": ${(err as Error).message}`);
-      // Default to accepting if LLM is unavailable
-      return true;
-    }
-  }
 
-  private pillarDescription(pillar: Pillar): string {
-    const descriptions: Record<Pillar, string> = {
-      anime: 'Japanese animation series, anime news, character reveals, anime studios, streaming releases, voice actors, anime adaptations',
-      gaming: 'Japanese video games, Nintendo, Sony PlayStation, gaming hardware from Japan, game releases, Japanese game developers',
-      infotainment: 'Japanese pop culture news, celebrity gossip in Japan, Japanese entertainment industry, Japan lifestyle, food, travel, viral Japan stories',
-      manga: 'Japanese comic books/manga, manga artists, manga releases, manga adaptations, light novels, webtoons from Japan',
-      toys: 'Japanese action figures, collectibles, Gundam, Funko-style toys from Japan, limited edition Japanese merchandise, trading cards, figurines',
-    };
-    return descriptions[pillar];
-  }
+      const result = parseJsonResponse<{
+        status: string;
+        pillar: string;
+        extracted_facts: string;
+        translation_notes: string;
+      }>(raw);
 
-  /**
-   * Fetch and select candidate articles for a single pillar.
-   * Returns up to `needed` items that are not yet processed and are relevant.
-   */
-  async fetchPillarCandidates(
-    pillar: Pillar,
-    needed: number,
-    rejectedUrls: Set<string> = new Set()
-  ): Promise<ScoutItem[]> {
-    this.log(`[Scout] Fetching candidates for pillar: ${PILLAR_LABELS[pillar]}`);
+      if (result.status === 'REJECTED') return null;
 
-    const items = await fetchPillarFeeds(pillar);
+      const pillar = PILLAR_FROM_LABEL[result.pillar];
+      if (!pillar) return null;
 
-    // Evaluate all candidates in parallel — DB checks + LLM triage fire simultaneously
-    const candidates = items.filter((item) => !rejectedUrls.has(item.link));
-
-    const evaluated = await Promise.all(
-      candidates.map(async (item) => {
-        const alreadyProcessed = await this.isProcessed(item.link);
-        if (alreadyProcessed) {
-          this.log(`[Scout] Skipping already-processed: ${item.link}`);
-          return null;
-        }
-        const relevant = await this.evaluateTopicRelevance(item.title, item.summary, pillar);
-        if (!relevant) {
-          this.log(`[Scout] Rejected irrelevant topic: "${item.title}"`);
-          return null;
-        }
-        return item;
-      })
-    );
-
-    const selected: ScoutItem[] = evaluated
-      .filter((item): item is NonNullable<typeof item> => item !== null)
-      .slice(0, needed)
-      .map((item) => ({
-        title: item.title,
-        link: item.link,
-        summary: item.summary,
+      return {
+        status: 'APPROVED',
         pillar,
-      }));
-
-    for (const item of selected) {
-      this.log(`[Scout] Selected: "${item.title}" [${pillar}]`);
+        extracted_facts: result.extracted_facts || '',
+        translation_notes: result.translation_notes || '',
+      };
+    } catch (err) {
+      this.log(`[Scout] Triage failed for "${title}": ${(err as Error).message}`);
+      return null;
     }
-
-    if (selected.length < needed) {
-      this.log(`[Scout] Warning: Only found ${selected.length}/${needed} items for ${pillar}`);
-    }
-
-    return selected;
   }
 
   /**
-   * Main Scout run: collect exactly ARTICLES_PER_PILLAR per pillar.
-   * Accepts a set of rejected URLs from the Researcher to retry with different articles.
+   * Main Scout run: fetch all priority feeds, triage each item dynamically,
+   * and return up to ARTICLES_PER_PILLAR items per pillar.
+   *
+   * Accepts a set of rejected URLs from the Researcher to exclude on retry.
    */
   async run(rejectedUrls: Set<string> = new Set()): Promise<ScoutItem[]> {
     this.log('[Scout] Starting RSS triage run...');
-    const allItems: ScoutItem[] = [];
 
-    // Process pillars in parallel
-    const pillarPromises = PILLARS.map((pillar) =>
-      this.fetchPillarCandidates(pillar, ARTICLES_PER_PILLAR, rejectedUrls)
-    );
+    // Fetch all priority feeds once (all pillars share the same mixed-topic feeds)
+    const rawItems = await fetchPillarFeeds('anime');
 
-    const results = await Promise.allSettled(pillarPromises);
+    // Filter out rejected and already-processed URLs
+    const candidates = rawItems.filter((item) => !rejectedUrls.has(item.link));
 
-    for (let i = 0; i < results.length; i++) {
-      const result = results[i];
-      const pillar = PILLARS[i];
-      if (result.status === 'fulfilled') {
-        allItems.push(...result.value);
+    const unprocessed: typeof candidates = [];
+    for (const item of candidates) {
+      const processed = await this.isProcessed(item.link);
+      if (processed) {
+        this.log(`[Scout] Skipping already-processed: ${item.link}`);
       } else {
-        this.log(`[Scout] Failed to fetch pillar ${pillar}: ${result.reason}`);
+        unprocessed.push(item);
       }
     }
 
-    this.log(`[Scout] Triage complete. Found ${allItems.length} candidate articles.`);
-    return allItems;
+    if (unprocessed.length === 0) {
+      this.log('[Scout] No new items found in feeds.');
+      return [];
+    }
+
+    this.log(`[Scout] Triaging ${unprocessed.length} unprocessed items...`);
+
+    // Triage all items in parallel
+    const triaged = await Promise.all(
+      unprocessed.map(async (item) => {
+        const result = await this.triageItem(item.title, item.summary);
+        if (!result) {
+          this.log(`[Scout] Rejected: "${item.title}"`);
+          return null;
+        }
+        return { item, result };
+      })
+    );
+
+    // Group by pillar, capped at ARTICLES_PER_PILLAR each
+    const byPillar: Record<Pillar, ScoutItem[]> = {
+      anime: [],
+      gaming: [],
+      infotainment: [],
+      manga: [],
+      toys: [],
+    };
+
+    for (const entry of triaged) {
+      if (!entry) continue;
+      const { item, result } = entry;
+      const bucket = byPillar[result.pillar];
+      if (bucket.length < ARTICLES_PER_PILLAR) {
+        bucket.push({
+          title: item.title,
+          link: item.link,
+          summary: item.summary,
+          pillar: result.pillar,
+          translationNotes: result.translation_notes,
+        });
+      }
+    }
+
+    const selected: ScoutItem[] = [];
+    for (const pillar of PILLARS) {
+      for (const item of byPillar[pillar]) {
+        this.log(`[Scout] Selected: "${item.title}" [${pillar}]`);
+        selected.push(item);
+      }
+      if (byPillar[pillar].length < ARTICLES_PER_PILLAR) {
+        this.log(
+          `[Scout] Warning: Only found ${byPillar[pillar].length}/${ARTICLES_PER_PILLAR} items for ${PILLAR_LABELS[pillar]}`
+        );
+      }
+    }
+
+    this.log(`[Scout] Triage complete. Found ${selected.length} candidate articles.`);
+    return selected;
   }
 }
