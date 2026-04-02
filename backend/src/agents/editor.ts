@@ -2,10 +2,10 @@
  * Agent 4: Editor-in-Chief (The Guardrail)
  *
  * Responsibilities:
- * - Full editorial review: quality, tone, hallucination check, UU ITE compliance, image placement
+ * - HTTP HEAD pre-check on image URLs before calling the LLM
+ * - Full editorial review: Indonesian headline, writing quality, UU ITE, image validity
  * - Output: PASS or FAIL with structured feedback
- * - Auto-fix minor issues (Edge Case 1)
- * - Classify failures: MAJOR (rewrite needed) or IMAGE (new images needed)
+ * - Classify failures: WRITING_REVISION (rewrite) or INCOMPLETE_INFO (new images)
  * - Enforce 3-strike rule
  */
 
@@ -13,6 +13,25 @@ import { chat, parseJsonResponse } from '../services/llm';
 import { marked } from 'marked';
 import type { DraftArticle, EditorResult } from '../../../shared/types';
 import { PILLAR_LABELS } from '../../../shared/types';
+
+/**
+ * HTTP HEAD pre-check for image URLs.
+ * Returns false if any URL is broken or unreachable within 3 seconds.
+ */
+async function checkImageUrls(urls: string[]): Promise<boolean> {
+  for (const url of urls) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
+      const response = await fetch(url, { method: 'HEAD', signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (!response.ok) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
 
 export class Editor {
   private log: (msg: string) => void;
@@ -23,10 +42,29 @@ export class Editor {
 
   /**
    * Perform a full editorial review of a draft article.
+   * Runs an HTTP HEAD pre-check on images first; if any are broken,
+   * bypasses the LLM and immediately returns an INCOMPLETE_INFO failure.
    */
   async review(draft: DraftArticle, revisionCount: number): Promise<EditorResult> {
     this.log(`[Editor] Reviewing draft: "${draft.title}" (revision ${revisionCount})`);
 
+    // ── Image pre-check ─────────────────────────────────────────────────────
+    const imageUrls = draft.images.map((img) => img.url);
+    if (imageUrls.length > 0) {
+      const imagesValid = await checkImageUrls(imageUrls);
+      if (!imagesValid) {
+        this.log(`[Editor] Image pre-check FAILED for "${draft.title}" — broken URL(s) detected.`);
+        return {
+          passed: false,
+          autoFixed: false,
+          feedback: 'INCOMPLETE_INFO: Backend detected 404/broken image URLs. Routing back to Researcher for replacement.',
+          issueType: 'IMAGE',
+          hallucinations: [],
+        };
+      }
+    }
+
+    // ── LLM editorial review ─────────────────────────────────────────────────
     const pillarLabel = PILLAR_LABELS[draft.pillar];
     const wordCount = draft.content.trim().split(/\s+/).length;
 
@@ -34,60 +72,83 @@ export class Editor {
       .map((img, i) => `${i + 1}. ${img.isFeatured ? '[FEATURED] ' : ''}${img.alt}: ${img.url}`)
       .join('\n');
 
-    const prompt = `You are the Editor-in-Chief of a Japanese pop-culture newsroom. Perform a comprehensive editorial review.
+    const prompt = `You are the **Editor-in-Chief Agent** (Pantheon) for a Japanese pop-culture newsroom. Your job is to review drafted articles and their embedded images before they are published.
 
-ARTICLE UNDER REVIEW:
+**INPUTS:**
+
+[Article Draft]:
 Title: "${draft.title}"
 Pillar: "${pillarLabel}"
 Word Count: ${wordCount} (acceptable range: 300–400)
-Images (${draft.images.length} total):
-${imageList}
 
-Article Content:
+Content:
 ---
 ${draft.content}
 ---
 
-REVIEW CRITERIA:
-1. Writing Quality: Grammar, spelling, clarity, flow, paragraph structure
-2. Tone & Pillar Match: Does the article fit the "${pillarLabel}" pillar voice?
-3. Accuracy & Hallucinations: Are there specific claims (dates, names, stats) that seem fabricated?
-4. UU ITE Compliance: Check for potentially defamatory content, privacy violations, or content that could violate Indonesian Electronic Information and Transactions law (no unverified criminal accusations, no private data exposure, no hate speech)
-5. Word Count Compliance: Is the article between 300–400 words?
-6. Image Placement: Are images placed contextually throughout the article? Is a featured image designated?
-7. Article Structure: Clear intro, body sections with headers, forward-looking conclusion?
+[Images] (${draft.images.length} total):
+${imageList}
 
-DECISION RULES:
-- PASS with AUTO-FIX: Minor grammar, punctuation, or formatting issues that you can fix yourself
-- FAIL MAJOR: Poor writing quality, wrong tone, potential hallucinations, UU ITE concerns, severe structural problems
-- FAIL IMAGE: Images are clearly irrelevant, missing, or improperly placed (and this is the primary problem)
+**REVIEW CRITERIA:**
+1. **Headline Check (FATAL):** The headline MUST be in Indonesian. If the headline is still written in Japanese characters (Kanji/Kana), you must FAIL the review.
+2. **Writing & Tone:** Ensure the text is fluent Indonesian, hallucination-free, and fits the required brand safety standards (No inflammatory content, passes UU ITE).
+3. **Image Validity (CRITICAL):** Evaluate the embedded image URLs. If your analysis determines an image is broken, fails to load, or is a generic placeholder/error image, you MUST FAIL the review.
+4. **Word Count:** Must be between 300 and 400 words.
+5. **Structure:** Clear intro, body sections with headers, forward-looking conclusion.
 
-Respond in JSON format:
+**OUTPUT FORMAT — respond ONLY with a JSON object:**
+
+If an image is broken or invalid:
 {
-  "passed": true/false,
-  "autoFixed": true/false,
-  "fixedContent": "the complete corrected article content (only if autoFixed is true)",
-  "feedback": "detailed feedback explaining all issues found",
-  "issueType": "MINOR" | "MAJOR" | "IMAGE" | null,
-  "hallucinations": ["list of potentially fabricated claims, or empty array"]
+  "status": "FAIL",
+  "error_category": "INCOMPLETE_INFO",
+  "reason": "Image X is broken/fails to load. Send back to Researcher for replacement."
 }
 
-If passed is true and autoFixed is true, include the full corrected markdown in fixedContent.
-If passed is false, provide specific, actionable feedback for the copywriter.`;
+If the headline is in Japanese or writing needs work:
+{
+  "status": "FAIL",
+  "error_category": "WRITING_REVISION",
+  "reason": "Specific actionable feedback for the copywriter."
+}
+
+If the article is perfect:
+{
+  "status": "PASS",
+  "error_category": "NONE",
+  "reason": "Article meets all editorial and visual standards."
+}`;
 
     try {
       const raw = await chat(
         [{ role: 'user', content: prompt }],
-        { temperature: 0.2, maxTokens: 1500 }
+        { temperature: 0.2, maxTokens: 600 }
       );
 
-      const result = parseJsonResponse<EditorResult>(raw);
+      const result = parseJsonResponse<{
+        status: string;
+        error_category: string;
+        reason: string;
+      }>(raw);
+
+      const passed = result.status === 'PASS';
+      const issueType: EditorResult['issueType'] =
+        result.error_category === 'INCOMPLETE_INFO' ? 'IMAGE' :
+        result.error_category === 'WRITING_REVISION' ? 'MAJOR' :
+        null;
+
       this.log(
-        `[Editor] Review complete for "${draft.title}": ${result.passed ? 'PASS' : 'FAIL'}` +
-        (result.autoFixed ? ' (auto-fixed)' : '') +
-        (result.issueType ? ` [${result.issueType}]` : '')
+        `[Editor] Review complete for "${draft.title}": ${passed ? 'PASS' : 'FAIL'}` +
+        (issueType ? ` [${issueType}]` : '')
       );
-      return result;
+
+      return {
+        passed,
+        autoFixed: false,
+        feedback: result.reason || '',
+        issueType,
+        hallucinations: [],
+      };
     } catch (err) {
       this.log(`[Editor] Review parsing failed: ${(err as Error).message}`);
       // On parse failure, do a lenient pass to avoid blocking the pipeline
@@ -102,10 +163,10 @@ If passed is false, provide specific, actionable feedback for the copywriter.`;
   }
 
   /**
-   * Apply auto-fixes to the content and regenerate HTML.
+   * Apply auto-fixes to the content.
    */
   async applyAutoFix(draft: DraftArticle, fixedContent: string): Promise<DraftArticle> {
-    const contentHtml = await marked.parse(fixedContent);
+    await marked.parse(fixedContent);
     return {
       ...draft,
       content: fixedContent,
@@ -127,11 +188,11 @@ If passed is false, provide specific, actionable feedback for the copywriter.`;
 
     if (passed) {
       if (revisionCount === 0 || (revisionCount === 0 && autoFixed)) {
-        return 'GREEN'; // Passed first try or with auto-fix only
+        return 'GREEN';
       }
-      return 'YELLOW'; // Passed after revision loops
+      return 'YELLOW';
     }
 
-    return 'RED'; // Failed, needs human review
+    return 'RED';
   }
 }

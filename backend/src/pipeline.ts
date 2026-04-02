@@ -162,6 +162,23 @@ export class Pipeline {
         );
       }
 
+      // Check for Copywriter routing signal (broken images detected in editor feedback)
+      if (draft.content.trim().startsWith('SYSTEM_ROUTE_TO_RESEARCHER')) {
+        this.addLog(`Copywriter signaled new images required for "${item.title}" — routing to Researcher`, 'warn', 'Pipeline');
+        const existingUrls = new Set(currentImages.map((img) => img.url));
+        const newImages = await this.researcher.findImages(item.title, item.pillar, existingUrls);
+        if (newImages.length > 0) {
+          currentImages = newImages;
+          this.addLog(`Replaced images for "${item.title}" (${newImages.length} new)`, 'info', 'Researcher');
+        } else {
+          this.addLog(`Could not find replacement images for "${item.title}"`, 'warn', 'Researcher');
+        }
+        revisionCount++;
+        lastEditorFeedback = '';
+        draft = null;
+        continue;
+      }
+
       // Save draft to DB
       const contentHtml = await marked.parse(draft.content);
       await this.updateArticle(articleId, {

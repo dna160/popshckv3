@@ -57,12 +57,17 @@ export class Copywriter {
     const prompt = `You are the **Master Copywriter Agent** for a premium Japanese pop-culture news portal. Your job is to weave raw facts into engaging, high-quality news articles.
 
 *** CRITICAL LANGUAGE DIRECTIVE ***
-Although these instructions are in English, **THE FINAL ARTICLE MUST BE WRITTEN ENTIRELY IN NATURAL, FLUENT INDONESIAN (Bahasa Indonesia), INCLUDING THE HEADLINE.** Do not sound like a robotic translation. Write like a native Indonesian pop-culture journalist. Do not output English text unless it is a proper noun, title, or Markdown syntax.
+The entire article, **ESPECIALLY THE HEADLINE**, MUST be written in natural, fluent INDONESIAN (Bahasa Indonesia).
+**DO NOT** copy the original Japanese headline verbatim. You MUST translate and adapt the raw Japanese title into a catchy, journalistic Indonesian headline using an H1 Markdown tag (\`# Headline\`).
 
-**INPUTS:**
+**INPUTS YOU WILL RECEIVE:**
+1. [Content Pillar]: The category of the article (Anime / Gaming / Infotainment / Manga / Toys).
+2. [Extracted Facts]: The raw facts extracted by the Researcher agent.
+3. [Translation Notes]: Crucial localization notes provided by the Scout. Use proper Romaji/English names instead of translating characters literally.
+4. [Images]: Three (3) image URLs and their descriptions.
+5. [Editor Notes]: (Optional) Critique from the Editor.
 
 [Content Pillar]: ${pillarLabel}
-
 [Title]: "${item.title}"
 [Source]: ${item.link}
 ${factsBlock}
@@ -70,17 +75,14 @@ ${translationBlock}
 ${imagesBlock}
 ${feedbackBlock}
 
-**STRICT WRITING RULES:**
-1. **Headline:** You MUST write a catchy headline in Bahasa Indonesia at the top of the article using an H1 Markdown tag (\`# Headline\`).
-2. **Word Count:** The body of the article MUST be between ${MIN_WORDS} and ${MAX_WORDS} words.
-3. **Anti-Hallucination:** DO NOT invent facts, dates, names, or quotes that are not in the [Extracted Facts]. Expand the prose to be engaging, but keep the substance 100% accurate to the source.
-4. **Format:** Use pure Markdown. Do not include conversational filler (e.g., do not write "Here is your article:").
-5. **Translation Notes:** You MUST use the proper Romaji/English names from [Translation Notes] instead of translating Japanese characters literally.
+**HANDLING BROKEN IMAGES (ROUTING RULE):**
+If the [Editor Notes] state that the images are broken, invalid, or flagged as "INCOMPLETE_INFO", you must NOT attempt to rewrite the text. Instead, you must immediately output the exact string: \`SYSTEM_ROUTE_TO_RESEARCHER: NEW_IMAGES_REQUIRED\`. This will instruct the backend to ping the Researcher for new image links.
 
-**IMAGE PLACEMENT RULES:**
-You must insert all three images into the article using the standard Markdown format: \`![alt text](URL)\`.
-- **Image 1 (Mandatory):** Place this directly beneath your H1 Headline, before the first paragraph. The alt-text MUST be exactly \`featured\`. Example: \`![featured](IMAGE_1_URL)\`
-- **Image 2 & Image 3:** Insert these intelligently within the body of the article (e.g., after a new heading or relevant paragraph). Use descriptive Indonesian alt-text based on the image context.
+**STRICT WRITING RULES:**
+1. **Headline:** Must be Bahasa Indonesia. (e.g., \`# [Indonesian Headline Here]\`).
+2. **Word Count:** 300 to 400 words.
+3. **Anti-Hallucination:** DO NOT invent facts, dates, names, or quotes not in the [Extracted Facts].
+4. **Format:** Pure Markdown. Image 1 must be placed right below the headline with the alt-text \`![featured](URL)\`. Images 2 and 3 should be placed intelligently within the body.
 
 **TONE GUIDELINES BASED ON [Content Pillar]:**
 - **Japanese Anime:** Enthusiastic and hype-focused. Celebrate the creators/studios. Use casual, welcoming greetings typical of Indonesian anime communities.
@@ -89,7 +91,7 @@ You must insert all three images into the article using the standard Markdown fo
 - **Japanese Manga:** Slightly literary and analytical. Focus on storytelling appreciation, art quality, and publishing industry news.
 - **Japanese Toys/Collectibles:** Collector-focused. Highly detailed regarding specifications, craftsmanship, exclusivity, and pricing.
 
-If [Editor Notes] are provided, you MUST read the critique carefully and rewrite the article to fix the mentioned issues so it passes the next review.
+If no image errors are present, write the article matching the tone of the [Content Pillar].
 
 Output ONLY the article in markdown. No meta-commentary, no word count notes.`;
 
@@ -97,6 +99,11 @@ Output ONLY the article in markdown. No meta-commentary, no word count notes.`;
       [{ role: 'user', content: prompt }],
       { temperature: 0.75, maxTokens: 800 }
     );
+
+    // Detect routing signal — Copywriter is telling pipeline to fetch new images
+    if (articleText.trim().startsWith('SYSTEM_ROUTE_TO_RESEARCHER')) {
+      this.log(`[Copywriter] Routing signal detected — new images required for "${item.title}"`);
+    }
 
     const wordCount = this.countWords(articleText);
     this.log(`[Copywriter] Draft written. Word count: ${wordCount}`);
