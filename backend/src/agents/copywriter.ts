@@ -12,7 +12,7 @@ import { chat } from '../services/llm';
 import type { ResearchedItem, DraftArticle, ArticleImage } from '../../../shared/types';
 import { PILLAR_LABELS } from '../../../shared/types';
 
-const MIN_WORDS = 300;
+const MIN_WORDS = 200;
 const MAX_WORDS = 400;
 
 export class Copywriter {
@@ -80,7 +80,7 @@ If the [Editor Notes] state that the images are broken, invalid, or flagged as "
 
 **STRICT WRITING RULES:**
 1. **Headline:** Must be Bahasa Indonesia. (e.g., \`# [Indonesian Headline Here]\`).
-2. **Word Count:** HARD LIMIT — 300 to 400 words. Count your words before outputting. If you are over 400, cut sentences. If you are under 300, expand an existing section. Do NOT exceed 400 words under any circumstances.
+2. **Word Count:** HARD LIMIT — 200 to 400 words. Count your words before outputting. If you are over 400, cut sentences. If you are under 200, expand an existing section. Do NOT exceed 400 words under any circumstances.
 3. **Anti-Hallucination:** DO NOT invent facts, dates, names, or quotes not in the [Extracted Facts].
 4. **Format:** Pure Markdown. Image 1 must be placed right below the headline with the alt-text \`![featured](URL)\`. Images 2 and 3 should be placed intelligently within the body.
 5. **Closing / Call-to-Action (MANDATORY):** Every article MUST end with a punchy 1–2 sentence closing that matches the pillar's context. Use informal, conversational Bahasa Indonesia. Examples:

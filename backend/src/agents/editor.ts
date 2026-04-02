@@ -80,7 +80,7 @@ export class Editor {
 [Article Draft]:
 Title: "${draft.title}"
 Pillar: "${pillarLabel}"
-Word Count: ${wordCount} (acceptable range: 300–400)
+Word Count: ${wordCount} (acceptable range: 200–400)
 
 [Attempt Number]: ${attemptNumber} of 3
 
@@ -101,7 +101,7 @@ Do NOT fail an article purely because the developer is Chinese or Korean.
 1. **Headline Check (FATAL):** The headline MUST be in Indonesian. If the headline is still written in Japanese characters (Kanji/Kana), you must FAIL the review.
 2. **Writing & Tone:** Ensure the text is fluent Indonesian, hallucination-free, and fits the required brand safety standards (No inflammatory content, passes UU ITE).
 3. **Image Validity (CRITICAL):** Evaluate the embedded image URLs. If your analysis determines an image is broken, fails to load, or is a generic placeholder/error image, you MUST FAIL the review.
-4. **Word Count:** Must be between 300 and 400 words.
+4. **Word Count:** Must be between 200 and 400 words.
 5. **Structure:** Clear intro, body sections with headers, forward-looking conclusion.
 
 **OUTPUT FORMAT AND ROUTING RULES:**
