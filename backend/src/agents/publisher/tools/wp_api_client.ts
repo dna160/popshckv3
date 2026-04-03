@@ -7,10 +7,10 @@
  *
  * Author–WP User ID mapping (matches persona names from specialized copywriters):
  *   Satoshi → 2  (Anime)
- *   Hikari  → 3  (Gaming)
- *   Kenji   → 4  (Infotainment)
+ *   Hikari  → 7  (Gaming)       WP user: MRYAKUZA
+ *   Kenji   → 9  (Infotainment) WP user: LISAKAGAWA
  *   Rina    → 5  (Manga)
- *   Taro    → 6  (Toys/Collectibles)
+ *   Taro    → 8  (Toys/Collectibles) WP user: FINALHERO
  */
 
 import type { ArticleImage, Pillar } from '../../../../../shared/types';
@@ -18,10 +18,10 @@ import type { ArticleImage, Pillar } from '../../../../../shared/types';
 // ── Author ID mapping ─────────────────────────────────────────────────────────
 export const AUTHOR_IDS: Record<string, number> = {
   Satoshi: 2,
-  Hikari:  3,
-  Kenji:   4,
+  Hikari:  7,  // WP user: MRYAKUZA
+  Kenji:   9,  // WP user: LISAKAGAWA
   Rina:    5,
-  Taro:    6,
+  Taro:    8,  // WP user: FINALHERO
 };
 
 // ── Category ID mapping ───────────────────────────────────────────────────────

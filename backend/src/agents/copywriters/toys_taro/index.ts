@@ -14,7 +14,7 @@ import { chat } from '../../../services/llm';
 import type { ResearchedItem, DraftArticle, ArticleImage } from '../../../../../shared/types';
 
 export const PERSONA_NAME = 'Taro';
-export const WP_AUTHOR_ID = 6;
+export const WP_AUTHOR_ID = 8; // WP user: FINALHERO
 
 export class ToysTaro {
   readonly personaName = PERSONA_NAME;

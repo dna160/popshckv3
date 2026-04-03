@@ -41,10 +41,8 @@ export const RSS_FEEDS: Record<Pillar, string[]> = {
     'https://www.animenewsnetwork.com/all/rss.xml',
   ],
   gaming: [
-    'https://www.siliconera.com/feed/',
   ],
   infotainment: [
-    'https://soranews24.com/feed/',
   ],
   manga: [
     'https://animecorner.me/category/manga/feed/',

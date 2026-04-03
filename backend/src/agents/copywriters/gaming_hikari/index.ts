@@ -13,7 +13,7 @@ import { chat } from '../../../services/llm';
 import type { ResearchedItem, DraftArticle, ArticleImage } from '../../../../../shared/types';
 
 export const PERSONA_NAME = 'Hikari';
-export const WP_AUTHOR_ID = 3;
+export const WP_AUTHOR_ID = 7; // WP user: MRYAKUZA
 
 export class GamingHikari {
   readonly personaName = PERSONA_NAME;
