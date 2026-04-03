@@ -33,11 +33,6 @@ export const PRIORITY_FEEDS: string[] = [
   'https://news.denfaminicogamer.jp/feed',            // Denfami                 [gaming] [anime] [manga]
   'https://essential-japan.com/feed/',                // Essential Japan         [infotainment]
   'https://www.toy-people.com/rss.php',               // Toy People News         [toys]
-  'https://feeds.feedburner.com/tokyohive',           // Tokyohive               [infotainment] [anime]
-  'https://www.oricon.co.jp/rss/news/',               // Oricon General          [infotainment]
-  'https://www.oricon.co.jp/rss/music/',              // Oricon Music            [infotainment] [anime]
-  'https://www.oricon.co.jp/rss/movie/',              // Oricon Movie            [infotainment] [anime]
-  'https://www.oricon.co.jp/rss/special/',            // Oricon Lifestyle/Ranks  [infotainment] [manga] [anime]
 ];
 
 /**
@@ -54,34 +49,30 @@ export const PRIORITY_FEEDS: string[] = [
  *
  * Tier 3 (fallback_protocol) re-uses these same feeds but sweeps ALL pillars,
  * sorted by FeedMemory score, when both Round 1 and Underquota have failed.
+ *
+ * Feed sources match the README Content Pillars table (source of truth).
  */
 export const RSS_FEEDS: Record<Pillar, string[]> = {
   anime: [
-    'https://www.animenewsnetwork.com/all/rss.xml',          // Anime News Network   [anime] [manga]
-    'https://natalie.mu/music/feed',                          // Natalie Music        [anime] [infotainment]
-    'https://www.oricon.co.jp/rss/music/',                    // Oricon Music         [infotainment] [anime]
-    'https://www.oricon.co.jp/rss/movie/',                    // Oricon Movie         [infotainment] [anime]
+    'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) [anime] [manga] [gaming] [infotainment]
   ],
   gaming: [
-    'https://natalie.mu/game/feed',                           // Natalie Game         [gaming]
+    'https://automaton-media.com/feed/',                // Automaton               [gaming] [anime] [manga]
+    'https://www.4gamer.net/rss/index.xml',             // 4Gamer                  [gaming]
+    'https://news.denfaminicogamer.jp/feed',             // Denfami                 [gaming] [anime] [manga]
   ],
   infotainment: [
-    'https://natalie.mu/eiga/feed',                           // Natalie Eiga         [infotainment] [anime]
-    'https://feeds.feedburner.com/tokyohive',                 // Tokyohive            [infotainment] [anime]
-    'https://www.oricon.co.jp/rss/news/',                     // Oricon General       [infotainment]
-    'https://www.oricon.co.jp/rss/music/',                    // Oricon Music         [infotainment] [anime]
-    'https://www.oricon.co.jp/rss/movie/',                    // Oricon Movie         [infotainment] [anime]
-    'https://www.oricon.co.jp/rss/special/',                  // Oricon Lifestyle     [infotainment] [manga] [anime]
+    'https://essential-japan.com/feed/',                // Essential Japan         [infotainment]
+    'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) [infotainment] [anime] [manga]
   ],
   manga: [
-    'https://natalie.mu/comic/feed',                          // Natalie Comic        [manga] [anime]
-    'https://www.animenewsnetwork.com/news/manga/rss.xml',    // ANN Manga            [manga]
-    'https://animecorner.me/category/manga/feed/',            // Anime Corner Manga   [manga] [anime]
-    'https://www.oricon.co.jp/rss/special/',                  // Oricon Lifestyle     [infotainment] [manga] [anime]
+    'https://automaton-media.com/feed/',                // Automaton               [gaming] [anime] [manga]
+    'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) [anime] [manga]
+    'https://news.denfaminicogamer.jp/feed',             // Denfami                 [gaming] [anime] [manga]
   ],
   toys: [
-    'https://www.toyark.com/feed/',                           // Toy Ark              [toys] [anime]
-    'https://www.toy-people.com/rss.php',                     // Toy People News      [toys]
+    'https://hobby.dengeki.com/feed/',                  // Dengeki Hobby           [toys] [anime]
+    'https://www.toy-people.com/rss.php',               // Toy People News         [toys]
   ],
 };
 
@@ -148,13 +139,14 @@ export async function fetchFeed(url: string, pillar: Pillar): Promise<RssItem[]>
 }
 
 /**
- * Fetch all feeds for a given pillar.
- * Only the priority Japanese feeds are used — no fallbacks.
- * The Scout's LLM triage filters items to the correct pillar.
+ * Fetch the Tier 1 (Priority / Subpillar) feeds for a given pillar.
+ * Uses RSS_FEEDS[pillar] — the hyper-specific subpillar branches, NOT the
+ * general PRIORITY_FEEDS (Tier 2). Called during Underquota Protocol.
  */
 export async function fetchPillarFeeds(pillar: Pillar): Promise<RssItem[]> {
-  const results = await Promise.allSettled(
-    PRIORITY_FEEDS.map((url) => fetchFeed(url, pillar))
+  const feedUrls = RSS_FEEDS[pillar] ?? [];
+  const results  = await Promise.allSettled(
+    feedUrls.map((url) => fetchFeed(url, pillar))
   );
 
   const allItems: RssItem[] = [];

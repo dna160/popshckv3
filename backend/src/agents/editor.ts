@@ -98,11 +98,14 @@ This includes HoYoverse, miHoYo, NEXON, Netmarble, Krafton, NetEase, and any gac
 Do NOT fail an article purely because the developer is Chinese or Korean.
 
 **REVIEW CRITERIA:**
-1. **Headline Check (FATAL):** The headline MUST be written entirely in Latin script — Indonesian sentence structure AND all proper nouns (game titles, anime titles, character names, studio names). The Scout Agent provides Translation Notes specifically so the Copywriter can write proper romanised names (e.g. "Demon Slayer" or "Kimetsu no Yaiba") instead of raw Kanji/Kana. If ANY Japanese Kanji or Kana characters appear anywhere in the headline, FAIL the review — it means the Copywriter ignored the Translation Notes.
-2. **Writing & Tone:** Ensure the text is fluent Indonesian, hallucination-free, and fits the required brand safety standards (No inflammatory content, passes UU ITE).
-3. **Image Validity (CRITICAL):** Evaluate the embedded image URLs. If your analysis determines an image is broken, fails to load, or is a generic placeholder/error image, you MUST FAIL the review.
-4. **Word Count:** Must be between 200 and 400 words.
-5. **Structure:** Clear intro, body sections with headers, forward-looking conclusion.
+1. **Judul Check:** The article MUST begin with a \`**Judul:**\` line before the H1. Check two things:
+   a. The line exists — if missing, FAIL with "judul line missing".
+   b. The title is 15 words or fewer — count the words after \`**Judul:**\`. If over 15, FAIL with "article title over 15 words". A title that ends mid-phrase (cut off) also fails — it must be a complete, meaningful phrase.
+2. **Headline Check (FATAL):** The headline MUST be written entirely in Latin script — Indonesian sentence structure AND all proper nouns (game titles, anime titles, character names, studio names). The Scout Agent provides Translation Notes specifically so the Copywriter can write proper romanised names (e.g. "Demon Slayer" or "Kimetsu no Yaiba") instead of raw Kanji/Kana. If ANY Japanese Kanji or Kana characters appear anywhere in the headline, FAIL the review — it means the Copywriter ignored the Translation Notes.
+3. **Writing & Tone:** Ensure the text is fluent Indonesian, hallucination-free, and fits the required brand safety standards (No inflammatory content, passes UU ITE).
+4. **Image Validity (CRITICAL):** Evaluate the embedded image URLs. If your analysis determines an image is broken, fails to load, or is a generic placeholder/error image, you MUST FAIL the review.
+5. **Word Count:** Must be between 200 and 400 words.
+6. **Structure:** Clear intro, body sections with headers, forward-looking conclusion.
 
 **OUTPUT FORMAT AND ROUTING RULES:**
 

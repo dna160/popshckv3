@@ -547,16 +547,19 @@ Respond ONLY with the JSON object.`;
   }
 
   /**
-   * Build a deduplicated, bucket-aware list of fallback feed URLs.
+   * Build a deduplicated, bucket-aware list of Tier 3 (Fallback) feed URLs.
    *
-   * Feeds are sorted by their FeedMemory usefulness score given the current
-   * bucket state — feeds historically strong in already-full pillars are
-   * pushed to the back (or skipped if scoring zero).  Feeds with no history
-   * score 0.5 (neutral) and are included near the front.
+   * Tier 3 is the broadest possible net — it combines EVERY feed available:
+   *   • PRIORITY_FEEDS   (Tier 2 — general mixed-topic)
+   *   • All RSS_FEEDS     (Tier 1 — hyper-specific subpillar branches)
    *
-   * This means if gaming is full, siliconera.com (100% gaming history) will
-   * rank last among fallback sources, while animenewsnetwork.com (anime) and
-   * soranews24.com (infotainment) will be fetched first.
+   * All feeds are deduplicated and sorted descending by FeedMemory usefulness
+   * score so feeds with historical affinity for still-missing pillars are
+   * fetched first. Feeds with no history score 0.5 (neutral).
+   *
+   * Using the extended 14-day age window (AGE_RETRY_DAYS) means this sweep
+   * also surfaces older articles that weren't fresh enough for Round 1 or
+   * Underquota — the "historical pool" element described in the spec.
    *
    * @param buckets - Current pillar fill counts (used for score calculation)
    * @param memory  - Empirical feed memory
@@ -568,22 +571,30 @@ Respond ONLY with the JSON object.`;
     const seen = new Set<string>();
     const entries: { url: string; score: number }[] = [];
 
+    const addUrl = (url: string) => {
+      if (seen.has(url)) return;
+      seen.add(url);
+      let domain = url;
+      try { domain = new URL(url).hostname; } catch { /* keep raw */ }
+      entries.push({ url, score: memory.score(domain, buckets) });
+    };
+
+    // Include Tier 1 (subpillar-specific) feeds first — already exhausted by
+    // underquota rounds, but the 14-day window may surface older items.
     for (const pillar of PILLARS) {
-      for (const url of RSS_FEEDS[pillar as Pillar]) {
-        if (!seen.has(url)) {
-          seen.add(url);
-          let domain = url;
-          try { domain = new URL(url).hostname; } catch { /* keep raw */ }
-          entries.push({ url, score: memory.score(domain, buckets) });
-        }
-      }
+      for (const url of RSS_FEEDS[pillar as Pillar]) addUrl(url);
     }
 
-    // Sort descending by usefulness — feeds useful for open pillars come first
+    // Include Tier 2 (general/mixed-topic) feeds — their items were triaged in
+    // round1TriagedUrls (a separate set from underquotaTriagedUrls), so items
+    // not consumed in Round 1 are still eligible here.
+    for (const url of PRIORITY_FEEDS) addUrl(url);
+
+    // Sort descending by usefulness — feeds strong in open pillars come first
     entries.sort((a, b) => b.score - a.score);
 
     this.log(
-      `[Scout] Fallback feed ranking: ` +
+      `[Scout] Tier 3 Fallback feed pool (${entries.length} feeds): ` +
       entries.map((e) => {
         let domain = e.url;
         try { domain = new URL(e.url).hostname; } catch { /* keep raw */ }
@@ -859,9 +870,20 @@ Respond ONLY with the JSON object.`;
     }
 
     // ── Select the correct per-tier triaged-URL set ───────────────────────────
-    const triagedUrls = mode === 'round_1'
+    //
+    // round_1            → only round1TriagedUrls (Tier 2 feeds exclusively)
+    // underquota_protocol → only underquotaTriagedUrls (Tier 1 feeds; Tier 2
+    //                       items remain eligible since round1TriagedUrls is
+    //                       separate — but Tier 1 feeds don't overlap with Tier 2)
+    // fallback_protocol  → BOTH sets merged, because Tier 3 now includes ALL
+    //                       feeds (Tier 1 + Tier 2). Without the merge, items
+    //                       triaged in Round 1 (round1TriagedUrls) would slip
+    //                       back through buildPool's triaged-URL filter.
+    const triagedUrls: Set<string> = mode === 'round_1'
       ? this.round1TriagedUrls
-      : this.underquotaTriagedUrls;
+      : mode === 'fallback_protocol'
+        ? new Set([...this.round1TriagedUrls, ...this.underquotaTriagedUrls])
+        : this.underquotaTriagedUrls;
 
     // ── Build deduplicated, age-filtered pool ─────────────────────────────────
     this.log(

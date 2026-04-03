@@ -39,6 +39,7 @@ import {
 import { updateUI, updateArticleState } from './tools/update_ui';
 import { ORCHESTRATOR_IDENTITY }        from './prompt';
 import { PILLARS, PILLAR_LABELS }        from '../../../shared/types';
+import { TopicBank }                     from '../services/topic-bank';
 import type {
   Pillar,
   ScoutItem,
@@ -156,6 +157,24 @@ export class Orchestrator {
     return markdown.replace(/^#\s+[^\n]+\n?/, '').trimStart();
   }
 
+  /**
+   * Extract the explicit short article title written by the Copywriter.
+   * Format: `**Judul:** text here` (first occurrence in the draft).
+   * Returns null if the line is absent — caller falls back to H1.
+   */
+  private extractJudul(markdown: string): string | null {
+    const match = markdown.match(/^\*\*Judul:\*\*\s*(.+)$/m);
+    return match ? match[1].trim() : null;
+  }
+
+  /**
+   * Remove the `**Judul:**` line (and one optional blank line after it) from
+   * the draft so it isn't stored in the article body.
+   */
+  private stripJudul(markdown: string): string {
+    return markdown.replace(/\*\*Judul:\*\*[^\n]*\n{0,2}/, '');
+  }
+
   // ── Master scouting phase ─────────────────────────────────────────────────────
 
   /**
@@ -175,12 +194,47 @@ export class Orchestrator {
    */
   private async orchestrateScoutingPhase(
     rejectedUrls: Set<string> = new Set()
-  ): Promise<Record<Pillar, ScoutItem[]>> {
+  ): Promise<{ buckets: Record<Pillar, ScoutItem[]>; bank: TopicBank }> {
     const TARGET = TARGET_CANDIDATES_PER_PILLAR;
+
+    // ── Load Brain ────────────────────────────────────────────────────────────
+    const bank = new TopicBank();
+    await bank.load((msg) => this.addLog(msg, 'info', ORCHESTRATOR_IDENTITY));
+
+    // Prune topics whose URLs are already in the ProcessedUrl table
+    const processed    = await this.prisma.processedUrl.findMany({ select: { url: true } });
+    const processedSet = new Set(processed.map((p) => p.url));
+    const pruned       = bank.pruneProcessed(processedSet);
+    if (pruned > 0) {
+      this.addLog(`[Brain] Pruned ${pruned} already-processed topic(s) from bank`, 'info', ORCHESTRATOR_IDENTITY);
+    }
 
     const buckets: Record<Pillar, ScoutItem[]> = {
       anime: [], gaming: [], infotainment: [], manga: [], toys: [],
     };
+
+    // ── Pre-fill buckets from Brain ───────────────────────────────────────────
+    let totalRecalled = 0;
+    for (const pillar of PILLARS) {
+      if (bank.getAvailableCount(pillar) > 0) {
+        const recalled = bank.recall(pillar, TARGET);
+        buckets[pillar].push(...recalled);
+        totalRecalled += recalled.length;
+      }
+    }
+    if (totalRecalled > 0) {
+      const state = PILLARS
+        .map((p) => `${PILLAR_LABELS[p].replace('Japanese ', '')}:${buckets[p].length}/${TARGET}`)
+        .join('  ');
+      this.addLog(
+        `[Brain] Pre-filled ${totalRecalled} pre-triaged topic(s) from bank | ${state}`,
+        'info',
+        ORCHESTRATOR_IDENTITY
+      );
+    }
+
+    // Overflow accumulator — approved Scout items that don't fit in full buckets
+    const overflow: ScoutItem[] = [];
 
     const isQuotaMet    = () => PILLARS.every((p) => buckets[p].length >= TARGET);
     const getMissing    = () => PILLARS.filter((p) => buckets[p].length < TARGET);
@@ -192,6 +246,8 @@ export class Orchestrator {
         if (buckets[topic.pillar].length < TARGET) {
           buckets[topic.pillar].push(topic);
           slotted++;
+        } else {
+          overflow.push(topic); // bucket full → bank for future runs
         }
       }
       const state = PILLARS
@@ -311,7 +367,18 @@ export class Orchestrator {
       );
     }
 
-    return buckets;
+    // ── Bank overflow topics for future runs ──────────────────────────────────
+    if (overflow.length > 0) {
+      const added = bank.add(overflow);
+      this.addLog(
+        `[Brain] ${added} overflow topic(s) banked` +
+        (overflow.length - added > 0 ? ` (${overflow.length - added} duplicate(s) skipped)` : ''),
+        'info',
+        ORCHESTRATOR_IDENTITY
+      );
+    }
+
+    return { buckets, bank };
   }
 
   // ── Article revision loop ─────────────────────────────────────────────────────
@@ -394,15 +461,21 @@ export class Orchestrator {
         continue;
       }
 
-      // Extract Indonesian headline
-      const extractedTitle = this.extractH1(draft.content);
-      if (extractedTitle) {
-        indonesianTitle = extractedTitle;
-        this.addLog(`[${personaName}] Indonesian headline: "${indonesianTitle}"`, 'info', personaName);
+      // Extract article title: prefer explicit **Judul:** line, fall back to H1
+      const extractedJudul = this.extractJudul(draft.content);
+      const extractedH1    = this.extractH1(draft.content);
+      const resolvedTitle  = extractedJudul ?? extractedH1;
+      if (resolvedTitle) {
+        indonesianTitle = resolvedTitle;
+        this.addLog(
+          `[${personaName}] Article title (${extractedJudul ? 'Judul' : 'H1 fallback'}): "${indonesianTitle}"`,
+          'info',
+          personaName
+        );
       }
 
-      // Persist draft via update_ui — strip H1 from body so it doesn't duplicate the title field
-      const bodyContent = this.stripH1(draft.content);
+      // Strip Judul line then H1 from body so neither duplicates the stored title
+      const bodyContent = this.stripH1(this.stripJudul(draft.content));
       const contentHtml = await marked.parse(bodyContent);
       await updateArticleState(this.prisma, articleId, {
         ...(indonesianTitle ? { title: indonesianTitle } : {}),
@@ -536,17 +609,39 @@ export class Orchestrator {
   private async runPillarQueue(
     pillar:     Pillar,
     candidates: ScoutItem[],
-    target:     number
+    target:     number,
+    bank:       TopicBank
   ): Promise<number> {
     const persona    = this.copywriters[pillar].personaName;
     let successCount = 0;
 
-    for (const topic of candidates) {
+    // Recall brain backup upfront — only reached after main candidates are exhausted.
+    // We recall up to `target` extra items so we have a meaningful reserve.
+    const brainBackup  = bank.recall(pillar, target);
+    const fullQueue    = [...candidates, ...brainBackup];
+    let   brainLogged  = false;
+    let   processedIdx = 0; // how many items we actually started on (for banking untried)
+
+    for (const topic of fullQueue) {
       if (successCount >= target) break;
       this.checkAbort();
 
+      const isBrainItem = processedIdx >= candidates.length;
+
+      // Announce the first time we cross into brain territory
+      if (isBrainItem && !brainLogged) {
+        brainLogged = true;
+        this.addLog(
+          `[Brain] Main queue exhausted — recalling ${brainBackup.length} banked topic(s) for ${pillar}`,
+          'info',
+          ORCHESTRATOR_IDENTITY
+        );
+      }
+
+      processedIdx++;
+
       this.addLog(
-        `[${pillar}/${persona}] Processing candidate (${successCount}/${target}): "${topic.title}"`,
+        `[${pillar}/${persona}${isBrainItem ? ' ·Brain' : ''}] Processing candidate (${successCount}/${target}): "${topic.title}"`,
         'info',
         ORCHESTRATOR_IDENTITY
       );
@@ -587,6 +682,19 @@ export class Orchestrator {
         this.addLog(
           `[${pillar}/${persona}] ✗ ${finalStatus}: "${topic.title}" — fetching next candidate`,
           'warn',
+          ORCHESTRATOR_IDENTITY
+        );
+      }
+    }
+
+    // Bank any items we never reached (quota hit early or pool exhausted with leftover brain items)
+    const untriedItems = fullQueue.slice(processedIdx);
+    if (untriedItems.length > 0) {
+      const added = bank.add(untriedItems);
+      if (added > 0) {
+        this.addLog(
+          `[Brain] ${added} untried topic(s) from ${pillar} returned to bank`,
+          'info',
           ORCHESTRATOR_IDENTITY
         );
       }
@@ -641,7 +749,10 @@ export class Orchestrator {
       // (round_1 → underquota_protocol → fallback_protocol) until all 5 pillar
       // buckets hold TARGET_CANDIDATES_PER_PILLAR (10) candidates each,
       // feeds are exhausted, or MAX_SCOUT_ROUNDS is reached.
-      const candidatesByPillar = await this.orchestrateScoutingPhase();
+      //
+      // The TopicBank (Brain) pre-fills buckets with previously-triaged topics
+      // before any Scout round, so the Scout only fills remaining slots.
+      const { buckets: candidatesByPillar, bank } = await this.orchestrateScoutingPhase();
 
       for (const pillar of PILLARS) {
         const persona = this.copywriters[pillar].personaName;
@@ -656,9 +767,12 @@ export class Orchestrator {
       this.addLog('Dispatching all 5 pillar queues in parallel...', 'info', ORCHESTRATOR_IDENTITY);
       const pillarResults = await Promise.all(
         PILLARS.map((pillar) =>
-          this.runPillarQueue(pillar, candidatesByPillar[pillar], ARTICLES_PER_PILLAR)
+          this.runPillarQueue(pillar, candidatesByPillar[pillar], ARTICLES_PER_PILLAR, bank)
         )
       );
+
+      // ── Save Brain after all queues complete ─────────────────────────────────
+      await bank.save((msg) => this.addLog(msg, 'info', ORCHESTRATOR_IDENTITY));
 
       articlesProcessed = pillarResults.reduce((sum, count) => sum + count, 0);
 

@@ -672,5 +672,151 @@ Built as a POC (Proof of Concept) demonstrating autonomous newsroom automation.
 
 ---
 
-**Last Updated:** April 2, 2026
-**Version:** 1.0.0
+**Last Updated:** April 3, 2026
+**Version:** 1.1.0
+
+---
+
+## Changelog — Session 2 (2026-04-03)
+
+### Scout & Master Orchestrator — Strict Handover Protocol
+
+**Files:** `backend/src/agents/scout.ts`, `backend/src/orchestrator/index.ts`
+
+The Scout was refactored from a self-managing agent into a pure stateless dispatcher. All quota logic moved exclusively to the Master Orchestrator.
+
+- Introduced `ScoutPayload` interface with three dispatch modes: `round_1`, `underquota_protocol`, `fallback_protocol`
+- Removed internal quota tracking from Scout — Master owns `ARTICLES_PER_PILLAR = 10`, `TARGET_CANDIDATES_PER_PILLAR = 10`, `MAX_SCOUT_ROUNDS = 10`, `MAX_SCOUT_EMPTY_ROUNDS = 3`
+- Added `triageAll()` — returns ALL approved items with no quota cap; Master caps via `processHandover()`
+- Added `orchestrateScoutingPhase()` to Orchestrator — full Master quota loop implementing the 3-tier dispatch sequence
+- Per-run Scout state (`triagedUrls`, `FeedMemory`) resets only on `round_1` dispatch
+
+---
+
+### 3-Tier Feed Hierarchy
+
+**Files:** `backend/src/services/rss.ts`, `backend/src/agents/scout.ts`
+
+| Tier | Label | Feeds | Scout Mode |
+|------|-------|-------|------------|
+| Tier 2 | Preferred — General | `PRIORITY_FEEDS` | `round_1` |
+| Tier 1 | Priority — Subpillar | `RSS_FEEDS` | `underquota_protocol` |
+| Tier 3 | Fallback — Broadest Net | All `RSS_FEEDS` scored by FeedMemory | `fallback_protocol` |
+
+- All feeds tagged with niche labels: `[gaming]`, `[anime]`, `[manga]`, `[toys]`, `[infotainment]`
+- Added **Tokyohive** and **Oricon** (4 sections: general, music, movie, lifestyle) to both Tier 2 and Tier 1
+- Populated previously empty `RSS_FEEDS.gaming` and `RSS_FEEDS.infotainment`
+
+---
+
+### Fix — Underquota Pool Returns 0 Items
+
+**File:** `backend/src/agents/scout.ts`
+
+**Problem:** Round 1 and underquota shared a single `triagedUrls` set. Round 1 loaded ~100 URLs into it; when `underquota_protocol` ran, `buildPool()` filtered against the same set and found nothing new.
+
+**Fix:** Split into two independent sets — `round1TriagedUrls` and `underquotaTriagedUrls`. The two tiers never cross-contaminate, so Tier 1 feeds always get a clean pool.
+
+---
+
+### Fix — Protocol Escalation (Results-Driven, Not Round-Count-Driven)
+
+**File:** `backend/src/orchestrator/index.ts`
+
+**Problem:** Escalation from `underquota_protocol` to `fallback_protocol` was triggered by `scoutRound <= 4` — an arbitrary number — causing fallback to activate prematurely.
+
+**Fix:** Escalation is now driven by empty-round counts:
+1. All deficit rounds → `underquota_protocol`
+2. After `MAX_SCOUT_EMPTY_ROUNDS` consecutive empty underquota rounds → escalate once to `fallback_protocol`
+3. After `MAX_SCOUT_EMPTY_ROUNDS` consecutive empty fallback rounds → proceed with partial quota
+
+---
+
+### Fix — Scout Pool Cap Not Respected
+
+**File:** `backend/src/agents/scout.ts`
+
+**Problem:** `buildPool()` returned `[...shuffle(topFresh), ...rest]`, appending all items beyond the cap. A 100-item cap produced 210-item pools.
+
+**Fix:** `return shuffle(topFresh)` — hard stop at `maxItems`. `FRESH_POOL_SIZE = 100`, `RETRY_POOL_SIZE = 50`.
+
+---
+
+### Fix — Headline Duplication in Published Articles
+
+**File:** `backend/src/orchestrator/index.ts`
+
+**Problem:** Copywriters write `# Indonesian Headline` as H1 in the markdown body. The orchestrator stored the full content including the H1, causing the headline to render twice.
+
+**Fix:** Added `stripH1()` applied to `bodyContent` before DB storage and HTML conversion. Editor still receives the full draft with H1 intact for its headline validation check.
+
+---
+
+### Fix — LLM Request Timeout (Pipeline Freeze Prevention)
+
+**File:** `backend/src/services/llm.ts`
+
+**Problem:** A Grok API call hung indefinitely — pipeline froze for 7+ hours with no recovery.
+
+**Fix:** Added `withTimeout()` wrapper with a 90-second hard deadline on all `llmClient.chat.completions.create()` calls. Timeout throws an error caught by the calling agent, allowing the pipeline to continue.
+
+```
+CHAT_TIMEOUT_MS = 90_000
+```
+
+---
+
+### Fix — LLM Word Count Annotations in Article Content
+
+**Files:** `backend/src/agents/copywriter.ts` + all 5 persona files
+
+**Problem:** Despite prompt instructions, the LLM appended trailing word-count lines (`**Word count: 350 words**`, `*(350 words)*`, etc.) to article content, which appeared verbatim in published articles.
+
+**Fix:** Added `stripWordCount()` to all 6 copywriter classes. Applied to `articleText` before storage and word-count validation. Handles all common annotation formats including `---` separator variants.
+
+---
+
+### Topic Bank — Overflow Reserve & Cross-Run Recall
+
+**Files:** `backend/src/services/topic-bank.ts`, `backend/src/orchestrator/index.ts`
+
+Implements the "Brain reserve pool": Scout-approved articles that don't fit the current run's quota are persisted and recalled in future runs or as mid-run fallback when a pillar queue is exhausted.
+
+**`TopicBank` service (`topic-bank.ts`):**
+- Persists pre-triaged `ScoutItem`s to `data/topic-bank.json` (FIFO, oldest-first recall)
+- Items older than `MAX_AGE_DAYS = 14` are pruned on load
+- `pruneProcessed(processedSet)` removes items whose source URLs are already in `ProcessedUrl` DB
+- `recall(pillar, n)` pops up to `n` items for a given pillar
+- `add(items)` banks overflow items, deduplicating by URL
+
+**Orchestrator integration:**
+- `orchestrateScoutingPhase()` loads the bank at start; pre-fills pillar buckets from banked topics before dispatching Scout — Scout only fetches remaining slots
+- `processHandover()` banks all bucket-overflow topics (LLM-approved but pillar already full) instead of silently dropping them
+- `runPillarQueue()` recalls banked topics as backup when the main candidate pool is exhausted mid-pillar before the article target is reached
+- Banked topics never reached during the run are re-banked for the next run
+
+**Workflow:**
+```
+Scout triage → gaming bucket full → topic banked
+Next run     → gaming bank recalled → Scout fills only remaining slots
+Mid-run      → 3 editor strikes → banked topic recalled → Researcher → Copywriter
+```
+
+---
+
+### Editor — Judul Line Validation
+
+**File:** `backend/src/agents/editor.ts`
+
+Added a new first-pass check: the article must begin with a `**Judul:**` metadata line before the H1.
+
+- `**Judul:**` line missing → FAIL "judul line missing"
+- Title after `**Judul:**` exceeds 15 words → FAIL "article title over 15 words"
+- Truncated or incomplete titles also fail
+
+---
+
+### Pending
+
+- **WordPress `rest_invalid_author` 400** — Publisher fails with invalid author IDs; WP_AUTHOR_IDs in copywriter persona files don't match actual WP instance users. Non-blocking.
+- **Editor false-failing Indonesian headlines** — Editor rejects with "headline still in Japanese" even when copywriter wrote a correct Indonesian H1. Suspected cause: Editor checking `draft.title` (Japanese source title) instead of H1 in `draft.content`.
