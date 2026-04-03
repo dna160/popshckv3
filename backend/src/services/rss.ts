@@ -18,37 +18,70 @@ export interface RssItem {
 }
 
 /**
- * Priority Japanese RSS feeds.
- * These are fetched for ALL pillars — the Scout's LLM triage assigns each
- * item to the correct pillar based on content relevance.
+ * ── Tier 2: Preferred — General Feeds (Round 1 / Broad Scrape) ───────────────
+ *
+ * Fetched on every Round 1 dispatch. Mixed-topic, high-volume Japanese
+ * pop-culture feeds. The Scout's LLM triage categorises each item into the
+ * correct pillar. These feeds organically cover all 5 pillars but are not
+ * specialised — they are the starting "broad net".
  */
 export const PRIORITY_FEEDS: string[] = [
-  'https://automaton-media.com/feed/',                // Automaton — gaming, anime, manga
-  'https://www.4gamer.net/rss/index.xml',             // 4Gamer — gaming
-  'https://hobby.dengeki.com/feed/',                  // Dengeki Hobby — toys/collectibles
-  'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) — anime, manga, infotainment
-  'https://news.denfaminicogamer.jp/feed',            // Denfami — gaming, manga, anime
-  'https://essential-japan.com/feed/',                // Essential Japan — infotainment, lifestyle, culture
-  'https://www.toy-people.com/rss.php',               // Toy People News — toys/collectibles
+  'https://automaton-media.com/feed/',                // Automaton               [gaming] [anime] [manga]
+  'https://www.4gamer.net/rss/index.xml',             // 4Gamer                  [gaming]
+  'https://hobby.dengeki.com/feed/',                  // Dengeki Hobby           [toys] [anime]
+  'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon)      [anime] [manga] [gaming] [infotainment]
+  'https://news.denfaminicogamer.jp/feed',            // Denfami                 [gaming] [anime] [manga]
+  'https://essential-japan.com/feed/',                // Essential Japan         [infotainment]
+  'https://www.toy-people.com/rss.php',               // Toy People News         [toys]
+  'https://feeds.feedburner.com/tokyohive',           // Tokyohive               [infotainment] [anime]
+  'https://www.oricon.co.jp/rss/news/',               // Oricon General          [infotainment]
+  'https://www.oricon.co.jp/rss/music/',              // Oricon Music            [infotainment] [anime]
+  'https://www.oricon.co.jp/rss/movie/',              // Oricon Movie            [infotainment] [anime]
+  'https://www.oricon.co.jp/rss/special/',            // Oricon Lifestyle/Ranks  [infotainment] [manga] [anime]
 ];
 
 /**
- * Pillar-specific fallback feeds used only when priority feeds yield
- * insufficient candidates for a given pillar.
+ * ── Tier 1: Priority — Subpillar Branch Feeds (Underquota Protocol) ──────────
+ *
+ * Activated ONLY when the Master Orchestrator detects a quota deficit after
+ * Round 1. The Scout switches from the broad net to a "sniper" approach,
+ * fetching exclusively from hyper-specific feeds that match the missing pillars.
+ *
+ * Rules:
+ *   - Only feeds for the missing_pillars are fetched; others are ignored.
+ *   - LLM triage strictly filters results to the target pillar(s) only.
+ *   - Pool size: 50 items (RETRY_POOL_SIZE) per dispatch.
+ *
+ * Tier 3 (fallback_protocol) re-uses these same feeds but sweeps ALL pillars,
+ * sorted by FeedMemory score, when both Round 1 and Underquota have failed.
  */
 export const RSS_FEEDS: Record<Pillar, string[]> = {
   anime: [
-    'https://www.animenewsnetwork.com/all/rss.xml',
+    'https://www.animenewsnetwork.com/all/rss.xml',          // Anime News Network   [anime] [manga]
+    'https://natalie.mu/music/feed',                          // Natalie Music        [anime] [infotainment]
+    'https://www.oricon.co.jp/rss/music/',                    // Oricon Music         [infotainment] [anime]
+    'https://www.oricon.co.jp/rss/movie/',                    // Oricon Movie         [infotainment] [anime]
   ],
   gaming: [
+    'https://natalie.mu/game/feed',                           // Natalie Game         [gaming]
   ],
   infotainment: [
+    'https://natalie.mu/eiga/feed',                           // Natalie Eiga         [infotainment] [anime]
+    'https://feeds.feedburner.com/tokyohive',                 // Tokyohive            [infotainment] [anime]
+    'https://www.oricon.co.jp/rss/news/',                     // Oricon General       [infotainment]
+    'https://www.oricon.co.jp/rss/music/',                    // Oricon Music         [infotainment] [anime]
+    'https://www.oricon.co.jp/rss/movie/',                    // Oricon Movie         [infotainment] [anime]
+    'https://www.oricon.co.jp/rss/special/',                  // Oricon Lifestyle     [infotainment] [manga] [anime]
   ],
   manga: [
-    'https://animecorner.me/category/manga/feed/',
+    'https://natalie.mu/comic/feed',                          // Natalie Comic        [manga] [anime]
+    'https://www.animenewsnetwork.com/news/manga/rss.xml',    // ANN Manga            [manga]
+    'https://animecorner.me/category/manga/feed/',            // Anime Corner Manga   [manga] [anime]
+    'https://www.oricon.co.jp/rss/special/',                  // Oricon Lifestyle     [infotainment] [manga] [anime]
   ],
   toys: [
-    'https://www.toyark.com/feed/',
+    'https://www.toyark.com/feed/',                           // Toy Ark              [toys] [anime]
+    'https://www.toy-people.com/rss.php',                     // Toy People News      [toys]
   ],
 };
 

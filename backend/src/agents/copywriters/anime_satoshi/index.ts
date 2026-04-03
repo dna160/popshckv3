@@ -29,6 +29,14 @@ export class AnimeSatoshi {
     return text.trim().split(/\s+/).filter((w) => w.length > 0).length;
   }
 
+  private stripWordCount(text: string): string {
+    return text
+      .replace(/\n+\*{0,2}\(?[Ww]ord\s*[Cc]ount:?\s*\d+\s*\w*\)?\*{0,2}\s*$/i, '')
+      .replace(/\n+\*{0,2}\(?\d+\s+words?\)?\*{0,2}\s*$/i, '')
+      .replace(/\n+---\s*\n[\s\S]*\d+\s*words?[\s\S]*$/i, '')
+      .trimEnd();
+  }
+
   async writeDraft(item: ResearchedItem, editorFeedback?: string): Promise<DraftArticle> {
     this.log(`[Satoshi/Anime] Writing draft: "${item.title}"`);
 
@@ -106,14 +114,15 @@ Output ONLY the article in markdown. No meta-commentary, no word count notes.`;
       this.log(`[Satoshi/Anime] Routing signal detected — new images required for "${item.title}"`);
     }
 
-    const wordCount = this.countWords(articleText);
+    const cleanedText = this.stripWordCount(articleText);
+    const wordCount = this.countWords(cleanedText);
     this.log(`[Satoshi/Anime] Draft written. Word count: ${wordCount}`);
 
     return {
       title:     item.title,
       pillar:    item.pillar,
       sourceUrl: item.link,
-      content:   articleText,
+      content:   cleanedText,
       images:    item.images,
       wordCount,
     };

@@ -22,6 +22,7 @@
 import { PrismaClient }      from '@prisma/client';
 import { marked }            from 'marked';
 import { Scout }             from '../agents/scout';
+import type { ScoutPayload } from '../agents/scout';
 import { Researcher }        from '../agents/researcher';
 import { Editor }            from '../agents/editor';
 import { Publisher }         from '../agents/publisher/index';
@@ -34,9 +35,10 @@ import {
   dispatchAgent,
   PILLAR_AGENT_MAP,
 } from './tools/dispatch_agent';
+
 import { updateUI, updateArticleState } from './tools/update_ui';
 import { ORCHESTRATOR_IDENTITY }        from './prompt';
-import { PILLARS }                      from '../../../shared/types';
+import { PILLARS, PILLAR_LABELS }        from '../../../shared/types';
 import type {
   Pillar,
   ScoutItem,
@@ -47,7 +49,24 @@ import type {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MAX_REVISION_LOOPS  = 3;
-const ARTICLES_PER_PILLAR = 2;
+
+/**
+ * How many Scout candidates the Master must collect per pillar before
+ * advancing to the Researcher phase (50 total across all 5 pillars).
+ */
+const TARGET_CANDIDATES_PER_PILLAR = 10;
+
+/**
+ * How many successfully published (GREEN/YELLOW) articles the Master
+ * targets per pillar per pipeline run (50 total).
+ */
+const ARTICLES_PER_PILLAR = 10;
+
+/** Safety cap on the number of Scout dispatch rounds in the underquota loop. */
+const MAX_SCOUT_ROUNDS    = 10;
+
+/** Consecutive empty Scout rounds before giving up on quota. */
+const MAX_SCOUT_EMPTY_ROUNDS = 3;
 
 // ── Shared copywriter interface ───────────────────────────────────────────────
 interface CopywriterAgent {
@@ -130,6 +149,169 @@ export class Orchestrator {
   private extractH1(markdown: string): string | null {
     const match = markdown.match(/^#\s+(.+)$/m);
     return match ? match[1].trim() : null;
+  }
+
+  /** Remove the leading H1 line from markdown so the stored body doesn't duplicate the article title. */
+  private stripH1(markdown: string): string {
+    return markdown.replace(/^#\s+[^\n]+\n?/, '').trimStart();
+  }
+
+  // ── Master scouting phase ─────────────────────────────────────────────────────
+
+  /**
+   * Master Orchestrator's scouting phase — the sole brain of the quota loop.
+   *
+   * The Scout is a pure data-retriever: it fetches feeds, triages items, and
+   * returns candidates. It does NOT track quotas or manage loops.
+   *
+   * Flow:
+   *   1. Master dispatches Scout (round_1) → broad PRIORITY_FEEDS scrape.
+   *   2. Master slots approved topics into per-pillar buckets (caps at TARGET).
+   *   3. If any pillar is still short: Master re-dispatches Scout with
+   *      underquota_protocol (then fallback_protocol after round 4).
+   *   4. Continues until all 5 × TARGET_CANDIDATES_PER_PILLAR slots are
+   *      filled, feeds are exhausted, or MAX_SCOUT_ROUNDS is reached.
+   *   5. Master then passes the full candidate set to the Researcher phase.
+   */
+  private async orchestrateScoutingPhase(
+    rejectedUrls: Set<string> = new Set()
+  ): Promise<Record<Pillar, ScoutItem[]>> {
+    const TARGET = TARGET_CANDIDATES_PER_PILLAR;
+
+    const buckets: Record<Pillar, ScoutItem[]> = {
+      anime: [], gaming: [], infotainment: [], manga: [], toys: [],
+    };
+
+    const isQuotaMet    = () => PILLARS.every((p) => buckets[p].length >= TARGET);
+    const getMissing    = () => PILLARS.filter((p) => buckets[p].length < TARGET);
+
+    /** Slot Scout results into pillar buckets; Master enforces the cap. */
+    const processHandover = (newTopics: ScoutItem[]): void => {
+      let slotted = 0;
+      for (const topic of newTopics) {
+        if (buckets[topic.pillar].length < TARGET) {
+          buckets[topic.pillar].push(topic);
+          slotted++;
+        }
+      }
+      const state = PILLARS
+        .map((p) => `${PILLAR_LABELS[p].replace('Japanese ', '')}:${buckets[p].length}/${TARGET}`)
+        .join('  ');
+      this.addLog(
+        `[Master] Handover processed — ${slotted} new slot(s) filled | ${state}`,
+        'info',
+        ORCHESTRATOR_IDENTITY
+      );
+    };
+
+    // ── Round 1: Broad scrape from PRIORITY_FEEDS ───────────────────────────
+    this.addLog(
+      `[Master] Initialising 50-slot quota (${TARGET}/pillar). Dispatching Scout — Round 1 (Broad Scrape)...`,
+      'info',
+      ORCHESTRATOR_IDENTITY
+    );
+    dispatchAgent('scout', 'all pillars', (msg) => this.addLog(msg, 'info', ORCHESTRATOR_IDENTITY));
+
+    const round1Topics = await this.scout.run({ mode: 'round_1' }, rejectedUrls);
+    processHandover(round1Topics);
+
+    // ── Underquota / Fallback loop ──────────────────────────────────────────
+    //
+    // Protocol escalation is driven by results, not by round number:
+    //   1. Always start with underquota_protocol (Tier 1 — subpillar feeds).
+    //   2. After MAX_SCOUT_EMPTY_ROUNDS consecutive empty underquota rounds,
+    //      escalate once to fallback_protocol (Tier 3 — widest net).
+    //   3. After MAX_SCOUT_EMPTY_ROUNDS consecutive empty fallback rounds,
+    //      all feeds are exhausted — proceed with partial quota.
+    //
+    let scoutRound        = 2;
+    let emptyRounds       = 0;
+    let useUnderquota     = true; // true → underquota_protocol, false → fallback_protocol
+
+    while (!isQuotaMet() && scoutRound <= MAX_SCOUT_ROUNDS) {
+      this.checkAbort();
+
+      const missingPillars = getMissing();
+      const missingLabels  = missingPillars.map((p) => PILLAR_LABELS[p]);
+      const deficit        = missingPillars
+        .map((p) => `${PILLAR_LABELS[p].replace('Japanese ', '')}(${TARGET - buckets[p].length} needed)`)
+        .join(', ');
+
+      const mode: ScoutPayload['mode'] = useUnderquota
+        ? 'underquota_protocol'
+        : 'fallback_protocol';
+
+      this.addLog(
+        `[Master] Quota deficit: ${deficit} — dispatching Scout round ${scoutRound} [${mode}]`,
+        'warn',
+        ORCHESTRATOR_IDENTITY
+      );
+
+      dispatchAgent('scout', missingLabels.join(', '), (msg) =>
+        this.addLog(msg, 'info', ORCHESTRATOR_IDENTITY)
+      );
+
+      const newTopics = await this.scout.run(
+        { mode, missing_pillars: missingLabels },
+        rejectedUrls
+      );
+
+      if (newTopics.length === 0) {
+        emptyRounds++;
+        this.addLog(
+          `[Master] Scout returned 0 results (${emptyRounds}/${MAX_SCOUT_EMPTY_ROUNDS} empty rounds)`,
+          'warn',
+          ORCHESTRATOR_IDENTITY
+        );
+
+        if (emptyRounds >= MAX_SCOUT_EMPTY_ROUNDS) {
+          if (useUnderquota) {
+            // Underquota feeds exhausted — escalate to fallback
+            useUnderquota = false;
+            emptyRounds   = 0;
+            this.addLog(
+              '[Master] Underquota feeds exhausted — escalating to Fallback Protocol (Tier 3).',
+              'warn',
+              ORCHESTRATOR_IDENTITY
+            );
+          } else {
+            // Fallback feeds also exhausted — nothing more to try
+            this.addLog(
+              '[Master] All feeds exhausted — proceeding with partial quota.',
+              'warn',
+              ORCHESTRATOR_IDENTITY
+            );
+            break;
+          }
+        }
+      } else {
+        emptyRounds = 0;
+        processHandover(newTopics);
+      }
+
+      scoutRound++;
+    }
+
+    // ── Final quota report ──────────────────────────────────────────────────
+    const total = PILLARS.reduce((sum, p) => sum + buckets[p].length, 0);
+    if (isQuotaMet()) {
+      this.addLog(
+        `[Master] 50-Article Quota Fulfilled! ${total} candidates ready. Proceeding to Researcher Phase.`,
+        'info',
+        ORCHESTRATOR_IDENTITY
+      );
+    } else {
+      const state = PILLARS
+        .map((p) => `${PILLAR_LABELS[p].replace('Japanese ', '')}:${buckets[p].length}/${TARGET}`)
+        .join('  ');
+      this.addLog(
+        `[Master] Partial quota — ${total}/50 candidates collected (${state}). Proceeding.`,
+        'warn',
+        ORCHESTRATOR_IDENTITY
+      );
+    }
+
+    return buckets;
   }
 
   // ── Article revision loop ─────────────────────────────────────────────────────
@@ -219,11 +401,12 @@ export class Orchestrator {
         this.addLog(`[${personaName}] Indonesian headline: "${indonesianTitle}"`, 'info', personaName);
       }
 
-      // Persist draft via update_ui
-      const contentHtml = await marked.parse(draft.content);
+      // Persist draft via update_ui — strip H1 from body so it doesn't duplicate the title field
+      const bodyContent = this.stripH1(draft.content);
+      const contentHtml = await marked.parse(bodyContent);
       await updateArticleState(this.prisma, articleId, {
         ...(indonesianTitle ? { title: indonesianTitle } : {}),
-        content:       draft.content,
+        content:       bodyContent,
         contentHtml,
         images:        JSON.stringify(currentImages),
         revisionCount,
@@ -234,12 +417,13 @@ export class Orchestrator {
       const editorResult = await this.editor.review(draft, revisionCount);
 
       if (editorResult.passed) {
-        let finalContent = draft.content;
+        // bodyContent is already stripped; if the editor auto-fixed, strip its output too
+        let finalContent = bodyContent;
         let finalHtml    = contentHtml;
 
         if (editorResult.autoFixed && editorResult.fixedContent) {
           this.addLog(`Editor applied auto-fix to "${item.title}"`, 'info', 'Editor');
-          finalContent = editorResult.fixedContent;
+          finalContent = this.stripH1(editorResult.fixedContent);
           finalHtml    = await marked.parse(finalContent);
         }
 
@@ -450,22 +634,19 @@ export class Orchestrator {
     let articlesProcessed = 0;
 
     try {
-      // ── Phase 1: Scout ──────────────────────────────────────────────────────
-      dispatchAgent('scout', 'all pillars', (msg) => this.addLog(msg, 'info', ORCHESTRATOR_IDENTITY));
-      const allCandidates = await this.scout.run();
-
-      const candidatesByPillar: Record<Pillar, ScoutItem[]> = {
-        anime:        allCandidates.filter((i) => i.pillar === 'anime'),
-        gaming:       allCandidates.filter((i) => i.pillar === 'gaming'),
-        infotainment: allCandidates.filter((i) => i.pillar === 'infotainment'),
-        manga:        allCandidates.filter((i) => i.pillar === 'manga'),
-        toys:         allCandidates.filter((i) => i.pillar === 'toys'),
-      };
+      // ── Phase 1: Master-controlled Scout scouting phase ─────────────────────
+      //
+      // The Master Orchestrator is the sole brain of the quota loop.
+      // orchestrateScoutingPhase() dispatches the Scout one or more times
+      // (round_1 → underquota_protocol → fallback_protocol) until all 5 pillar
+      // buckets hold TARGET_CANDIDATES_PER_PILLAR (10) candidates each,
+      // feeds are exhausted, or MAX_SCOUT_ROUNDS is reached.
+      const candidatesByPillar = await this.orchestrateScoutingPhase();
 
       for (const pillar of PILLARS) {
         const persona = this.copywriters[pillar].personaName;
         this.addLog(
-          `Scout delivered ${candidatesByPillar[pillar].length} candidates for ${pillar} → ${persona}`,
+          `[Master] ${candidatesByPillar[pillar].length}/${TARGET_CANDIDATES_PER_PILLAR} candidates for ${pillar} → ${persona}`,
           'info',
           ORCHESTRATOR_IDENTITY
         );
