@@ -2,7 +2,7 @@
 cmds = ["npm install"]
 
 [phases.build]
-cmds = ["npx prisma generate", "npx prisma db push --accept-data-loss", "npm run build"]
+cmds = ["npx prisma generate", "npm run build"]
 
 [start]
-cmd = "node dist/server.js"
+cmd = "npx prisma db push --accept-data-loss && node dist/server.js"
