@@ -10,7 +10,8 @@
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
-    "pipeline:run": "tsx src/continuous-pipeline.ts"
+    "pipeline:run": "tsx src/continuous-pipeline.ts",
+    "pipeline:trigger": "tsx src/pipeline-runner.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.10.0",

@@ -7,6 +7,7 @@
 
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
+import cron from 'node-cron';
 import { PrismaClient } from '@prisma/client';
 import { marked } from 'marked';
 import dotenv from 'dotenv';
@@ -363,6 +364,19 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 async function main(): Promise<void> {
   await prisma.$connect();
   console.log('[Server] Database connected.');
+
+  // ── Autonomous pipeline cron ──────────────────────────────────
+  const CRON_SCHEDULE = process.env.PIPELINE_CRON_SCHEDULE || '0 */4 * * *';
+  cron.schedule(CRON_SCHEDULE, async () => {
+    console.log('[CRON] Initiating autonomous newsroom run...');
+    try {
+      await runPipeline();
+    } catch (error) {
+      console.error('[CRON] Pipeline run failed:', error);
+    }
+  });
+  console.log(`[CRON] Pipeline scheduled: "${CRON_SCHEDULE}" (override with PIPELINE_CRON_SCHEDULE env var)`);
+  // ─────────────────────────────────────────────────────────────
 
   app.listen(PORT, () => {
     console.log(`[Server] Running on http://localhost:${PORT}`);
