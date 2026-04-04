@@ -21,8 +21,8 @@
 
 import { PrismaClient }      from '@prisma/client';
 import { marked }            from 'marked';
-import { Scout }             from '../agents/scout';
-import type { ScoutPayload } from '../agents/scout';
+import { Scout }              from '../agents/scout';
+import { UnderquotaProtocol } from '../agents/scout-underquota';
 import { Researcher }        from '../agents/researcher';
 import { Editor }            from '../agents/editor';
 import { Publisher }         from '../agents/publisher/index';
@@ -79,16 +79,17 @@ interface CopywriterAgent {
 
 // ── Orchestrator class ────────────────────────────────────────────────────────
 export class Orchestrator {
-  private prisma:      PrismaClient;
-  private scout:       Scout;
-  private researcher:  Researcher;
-  private editor:      Editor;
-  private publisher:   Publisher;
-  private copywriters: Record<Pillar, CopywriterAgent>;
-  private runId:       string | null = null;
-  private logs:        PipelineLogEntry[] = [];
-  private abortSignal: AbortSignal | null = null;
-  private onRunId:     ((id: string) => void) | null = null;
+  private prisma:             PrismaClient;
+  private scout:              Scout;
+  private underquotaProtocol: UnderquotaProtocol;
+  private researcher:         Researcher;
+  private editor:             Editor;
+  private publisher:          Publisher;
+  private copywriters:        Record<Pillar, CopywriterAgent>;
+  private runId:              string | null = null;
+  private logs:               PipelineLogEntry[] = [];
+  private abortSignal:        AbortSignal | null = null;
+  private onRunId:            ((id: string) => void) | null = null;
 
   constructor(prisma: PrismaClient, abortSignal?: AbortSignal, onRunId?: (id: string) => void) {
     this.prisma      = prisma;
@@ -96,8 +97,9 @@ export class Orchestrator {
     this.onRunId     = onRunId    ?? null;
 
     // ── Specialized Agent instances ───────────────────────────────────────────
-    this.scout      = new Scout(prisma, (msg) => this.addLog(msg, 'info', 'Scout'));
-    this.researcher = new Researcher((msg) => this.addLog(msg, 'info', 'Researcher'));
+    this.scout              = new Scout(prisma, (msg) => this.addLog(msg, 'info', 'Scout'));
+    this.underquotaProtocol = new UnderquotaProtocol(prisma, (msg) => this.addLog(msg, 'info', 'Underquota'));
+    this.researcher         = new Researcher((msg) => this.addLog(msg, 'info', 'Researcher'));
     this.editor     = new Editor((msg) => this.addLog(msg, 'info', 'Editor'));
     this.publisher  = new Publisher((msg) => this.addLog(msg, 'info', 'Publisher'));
 
@@ -271,18 +273,16 @@ export class Orchestrator {
     const round1Topics = await this.scout.run({ mode: 'round_1' }, rejectedUrls);
     processHandover(round1Topics);
 
-    // ── Underquota / Fallback loop ──────────────────────────────────────────
+    // ── Underquota Protocol loop ────────────────────────────────────────────
     //
-    // Protocol escalation is driven by results, not by round number:
-    //   1. Always start with underquota_protocol (Tier 1 — subpillar feeds).
-    //   2. After MAX_SCOUT_EMPTY_ROUNDS consecutive empty underquota rounds,
-    //      escalate once to fallback_protocol (Tier 3 — widest net).
-    //   3. After MAX_SCOUT_EMPTY_ROUNDS consecutive empty fallback rounds,
-    //      all feeds are exhausted — proceed with partial quota.
+    // Activated when Round 1 leaves any pillar below quota.
+    // The UnderquotaProtocol targets PRIORITY_FEEDS entries whose tags match
+    // the deficit pillar(s), building a focused pool of up to 50 items per
+    // dispatch.  No fallback escalation occurs here — if the tagged priority
+    // feeds are exhausted, the Master proceeds with whatever quota was reached.
     //
-    let scoutRound        = 2;
-    let emptyRounds       = 0;
-    let useUnderquota     = true; // true → underquota_protocol, false → fallback_protocol
+    let scoutRound  = 2;
+    let emptyRounds = 0;
 
     while (!isQuotaMet() && scoutRound <= MAX_SCOUT_ROUNDS) {
       this.checkAbort();
@@ -293,12 +293,8 @@ export class Orchestrator {
         .map((p) => `${PILLAR_LABELS[p].replace('Japanese ', '')}(${TARGET - buckets[p].length} needed)`)
         .join(', ');
 
-      const mode: ScoutPayload['mode'] = useUnderquota
-        ? 'underquota_protocol'
-        : 'fallback_protocol';
-
       this.addLog(
-        `[Master] Quota deficit: ${deficit} — dispatching Scout round ${scoutRound} [${mode}]`,
+        `[Master] Quota deficit: ${deficit} — dispatching Underquota Protocol round ${scoutRound}`,
         'warn',
         ORCHESTRATOR_IDENTITY
       );
@@ -307,38 +303,23 @@ export class Orchestrator {
         this.addLog(msg, 'info', ORCHESTRATOR_IDENTITY)
       );
 
-      const newTopics = await this.scout.run(
-        { mode, missing_pillars: missingLabels },
-        rejectedUrls
-      );
+      const newTopics = await this.underquotaProtocol.run(missingLabels, rejectedUrls);
 
       if (newTopics.length === 0) {
         emptyRounds++;
         this.addLog(
-          `[Master] Scout returned 0 results (${emptyRounds}/${MAX_SCOUT_EMPTY_ROUNDS} empty rounds)`,
+          `[Master] Underquota Protocol returned 0 results (${emptyRounds}/${MAX_SCOUT_EMPTY_ROUNDS} empty rounds)`,
           'warn',
           ORCHESTRATOR_IDENTITY
         );
 
         if (emptyRounds >= MAX_SCOUT_EMPTY_ROUNDS) {
-          if (useUnderquota) {
-            // Underquota feeds exhausted — escalate to fallback
-            useUnderquota = false;
-            emptyRounds   = 0;
-            this.addLog(
-              '[Master] Underquota feeds exhausted — escalating to Fallback Protocol (Tier 3).',
-              'warn',
-              ORCHESTRATOR_IDENTITY
-            );
-          } else {
-            // Fallback feeds also exhausted — nothing more to try
-            this.addLog(
-              '[Master] All feeds exhausted — proceeding with partial quota.',
-              'warn',
-              ORCHESTRATOR_IDENTITY
-            );
-            break;
-          }
+          this.addLog(
+            '[Master] Underquota Protocol exhausted — proceeding with partial quota.',
+            'warn',
+            ORCHESTRATOR_IDENTITY
+          );
+          break;
         }
       } else {
         emptyRounds = 0;

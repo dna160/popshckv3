@@ -17,6 +17,12 @@ export interface RssItem {
   sourceFeed: string; // hostname of the feed URL this item came from
 }
 
+/** A feed entry with explicit pillar affinity tags. */
+export interface FeedConfig {
+  url:  string;
+  tags: Pillar[]; // pillars this feed predominantly covers
+}
+
 /**
  * ── Tier 2: Preferred — General Feeds (Round 1 / Broad Scrape) ───────────────
  *
@@ -24,15 +30,36 @@ export interface RssItem {
  * pop-culture feeds. The Scout's LLM triage categorises each item into the
  * correct pillar. These feeds organically cover all 5 pillars but are not
  * specialised — they are the starting "broad net".
+ *
+ * ── Tier 1: Priority — Subpillar-Specific Feeds (Underquota Protocol) ─────────
+ *
+ * Entries with a single specific tag (e.g. tags: ['manga']) are subpillar
+ * branches. The Underquota Protocol filters this list by tag to build a
+ * targeted pool for exactly the deficit pillar(s).
+ *
+ * e.g. natalie.mu/comic → tagged ['manga'] → activated when manga is underquota
  */
-export const PRIORITY_FEEDS: string[] = [
-  'https://automaton-media.com/feed/',                // Automaton               [gaming] [anime] [manga]
-  'https://www.4gamer.net/rss/index.xml',             // 4Gamer                  [gaming]
-  'https://hobby.dengeki.com/feed/',                  // Dengeki Hobby           [toys] [anime]
-  'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon)      [anime] [manga] [gaming] [infotainment]
-  'https://news.denfaminicogamer.jp/feed',            // Denfami                 [gaming] [anime] [manga]
-  'https://essential-japan.com/feed/',                // Essential Japan         [infotainment]
-  'https://www.toy-people.com/rss.php',               // Toy People News         [toys]
+export const PRIORITY_FEEDS: FeedConfig[] = [
+  // ── General / mixed-topic (Round 1 broad net) ──────────────────────────────
+  { url: 'https://automaton-media.com/feed/',             tags: ['gaming', 'anime', 'manga']               },
+  { url: 'https://www.4gamer.net/rss/index.xml',          tags: ['gaming']                                 },
+  { url: 'https://hobby.dengeki.com/feed/',               tags: ['toys', 'anime']                          },
+  { url: 'https://chaosphere.hostdon.jp/@natalie.rss',    tags: ['anime', 'manga', 'gaming', 'infotainment'] },
+  { url: 'https://news.denfaminicogamer.jp/feed',         tags: ['gaming', 'anime', 'manga']               },
+  { url: 'https://essential-japan.com/feed/',             tags: ['infotainment']                           },
+  { url: 'https://www.toy-people.com/rss.php',            tags: ['toys']                                   },
+
+  // ── Subpillar-specific branches (Underquota Protocol — Tier 1) ─────────────
+  // Manga
+  { url: 'https://natalie.mu/comic/feed',                 tags: ['manga']                                  },
+  // Anime
+  { url: 'https://natalie.mu/anime/feed',                 tags: ['anime']                                  },
+  // Gaming
+  { url: 'https://natalie.mu/game/feed',                  tags: ['gaming']                                 },
+  // Infotainment
+  { url: 'https://natalie.mu/music/feed',                 tags: ['infotainment']                           },
+  // Toys / Collectibles
+  { url: 'https://www.amiami.com/eng/rss/newitem.xml',    tags: ['toys']                                   },
 ];
 
 /**

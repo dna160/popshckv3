@@ -588,7 +588,7 @@ Respond ONLY with the JSON object.`;
     // Include Tier 2 (general/mixed-topic) feeds — their items were triaged in
     // round1TriagedUrls (a separate set from underquotaTriagedUrls), so items
     // not consumed in Round 1 are still eligible here.
-    for (const url of PRIORITY_FEEDS) addUrl(url);
+    for (const feed of PRIORITY_FEEDS) addUrl(feed.url);
 
     // Sort descending by usefulness — feeds strong in open pillars come first
     entries.sort((a, b) => b.score - a.score);
@@ -835,7 +835,7 @@ Respond ONLY with the JSON object.`;
 
     if (mode === 'round_1') {
       // ── Tier 2: Preferred — broad scrape from general mixed-topic feeds ──────
-      feedUrls      = PRIORITY_FEEDS;
+      feedUrls      = PRIORITY_FEEDS.map((f) => f.url);
       ageDays       = AGE_LIMIT_DAYS;
       maxItems      = FRESH_POOL_SIZE;
       filterPillars = undefined; // accept all pillars
