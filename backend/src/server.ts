@@ -372,18 +372,6 @@ if (fs.existsSync(publicDir)) {
 // ============================================================
 // Error Handler
 // ============================================================
-// Serve frontend static files (built into ../public relative to dist/)
-// ============================================================
-const publicDir = path.join(__dirname, '..', 'public');
-if (fs.existsSync(publicDir)) {
-  app.use(express.static(publicDir));
-  app.get('*', (_req: Request, res: Response) => {
-    res.sendFile(path.join(publicDir, 'index.html'));
-  });
-  console.log('[Server] Serving frontend from', publicDir);
-}
-
-// ============================================================
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error('[Server] Unhandled error:', err);
   res.status(500).json({ success: false, error: err.message });
