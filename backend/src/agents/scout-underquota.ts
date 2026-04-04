@@ -21,7 +21,7 @@
  */
 
 import { PrismaClient }            from '@prisma/client';
-import { fetchFeed, PRIORITY_FEEDS } from '../services/rss';
+import { fetchFeed, PRIORITY_FEEDS, FEED_FALLBACK_MAP } from '../services/rss';
 import { chat, parseJsonResponse }  from '../services/llm';
 import type { Pillar, ScoutItem }   from '../shared/types';
 
@@ -170,9 +170,9 @@ export class UnderquotaProtocol {
     feedUrls:     string[],
     rejectedUrls: Set<string>
   ): Promise<PoolItem[]> {
-    // ── Step 1: Fetch all feeds concurrently ──────────────────────────────────
+    // ── Step 1: Fetch all feeds concurrently (with per-feed fallback) ─────────
     const feedResults = await Promise.allSettled(
-      feedUrls.map((url) => fetchFeed(url, 'anime'))
+      feedUrls.map((url) => fetchFeed(url, 'anime', FEED_FALLBACK_MAP.get(url)))
     );
 
     // ── Step 2: Collect and deduplicate raw items ─────────────────────────────
