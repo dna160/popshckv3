@@ -64,6 +64,48 @@ const PILLAR_LABEL: Record<Pillar, string> = {
   toys:         'Japanese Toys/Collectibles',
 };
 
+/**
+ * Fair-Source Interleave Algorithm
+ *
+ * Groups items by source, sorts each bucket newest-first, then draws
+ * one item from each source in a round-robin fashion until all buckets
+ * are exhausted. Guarantees the first N items in the result represent
+ * N different publishers — no hard caps, no artificial limits.
+ */
+function fairSourceInterleave(items: PoolItem[]): PoolItem[] {
+  const buckets = new Map<string, PoolItem[]>();
+  for (const item of items) {
+    if (!buckets.has(item.sourceFeed)) buckets.set(item.sourceFeed, []);
+    buckets.get(item.sourceFeed)!.push(item);
+  }
+
+  for (const bucket of buckets.values()) {
+    bucket.sort((a, b) => {
+      const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
+      const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
+      return tb - ta;
+    });
+  }
+
+  const result:   PoolItem[]   = [];
+  const sources:  PoolItem[][] = [...buckets.values()];
+  let drawIndex   = 0;
+  let keepDrawing = true;
+
+  while (keepDrawing) {
+    keepDrawing = false;
+    for (const bucket of sources) {
+      if (drawIndex < bucket.length) {
+        result.push(bucket[drawIndex]);
+        keepDrawing = true;
+      }
+    }
+    drawIndex++;
+  }
+
+  return result;
+}
+
 // ── Internal pool item type ───────────────────────────────────────────────────
 interface PoolItem {
   title:      string;
@@ -121,73 +163,55 @@ export class UnderquotaProtocol {
 
   /**
    * Fetch `feedUrls`, deduplicate, age-filter, skip already-processed /
-   * already-triaged URLs, and return up to UNDERQUOTA_POOL_SIZE candidates.
-   *
-   * Anti-dominance algorithm (mirrors Scout.buildPool):
-   *   1. Each feed sorted by its own freshness, capped at `perFeedCap` items.
-   *   2. All capped slices merged and re-sorted by global freshness.
-   *   3. Ensures newly-added or low-volume feeds always get representation.
+   * already-triaged URLs, and return up to UNDERQUOTA_POOL_SIZE candidates
+   * ordered by the Fair-Source Interleave algorithm.
    */
   private async buildPool(
     feedUrls:     string[],
     rejectedUrls: Set<string>
   ): Promise<PoolItem[]> {
+    // ── Step 1: Fetch all feeds concurrently ──────────────────────────────────
     const feedResults = await Promise.allSettled(
       feedUrls.map((url) => fetchFeed(url, 'anime'))
     );
 
-    // ── Per-feed cap ─────────────────────────────────────────────────────────
-    const activeFeedCount = feedResults.filter((r) => r.status === 'fulfilled').length;
-    const perFeedCap      = Math.max(5, Math.ceil(UNDERQUOTA_POOL_SIZE / Math.max(activeFeedCount, 1)));
-
-    const seenLinks   = new Set<string>();
-    const cappedItems: PoolItem[] = [];
+    // ── Step 2: Collect and deduplicate raw items ─────────────────────────────
+    const rawItems:  PoolItem[] = [];
+    const seenLinks = new Set<string>();
 
     for (const result of feedResults) {
       if (result.status !== 'fulfilled') continue;
-
-      const feedSlice = result.value
-        .filter((item) => !seenLinks.has(item.link))
-        .sort((a, b) => {
-          const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
-          const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
-          return tb - ta;
-        })
-        .slice(0, perFeedCap);
-
-      for (const item of feedSlice) {
-        seenLinks.add(item.link);
-        cappedItems.push({
-          title:      item.title,
-          link:       item.link,
-          summary:    item.summary,
-          pubDate:    item.pubDate,
-          sourceFeed: item.sourceFeed,
-        });
+      for (const item of result.value) {
+        if (!seenLinks.has(item.link)) {
+          seenLinks.add(item.link);
+          rawItems.push({
+            title:      item.title,
+            link:       item.link,
+            summary:    item.summary,
+            pubDate:    item.pubDate,
+            sourceFeed: item.sourceFeed,
+          });
+        }
       }
     }
 
-    // ── Global freshness sort + age filter ────────────────────────────────────
-    const cutoff = Date.now() - AGE_LIMIT_DAYS * 24 * 60 * 60 * 1000;
-    const sorted = cappedItems
-      .sort((a, b) => {
-        const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
-        const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
-        return tb - ta;
-      })
-      .filter((item) => !item.pubDate || new Date(item.pubDate).getTime() >= cutoff);
+    // ── Step 3: Fair-source interleave ────────────────────────────────────────
+    const interleaved = fairSourceInterleave(rawItems);
 
-    // Log per-feed contribution
-    const contrib = new Map<string, number>();
-    for (const item of sorted) contrib.set(item.sourceFeed, (contrib.get(item.sourceFeed) ?? 0) + 1);
+    const sourceCount = new Set(rawItems.map((i) => i.sourceFeed)).size;
     this.log(
-      `[Underquota] Pool — ${sorted.length} items, cap ${perFeedCap}/feed | ` +
-      [...contrib.entries()].map(([f, n]) => `${f}:${n}`).join(' ')
+      `[Underquota] Fair-source interleave — ${interleaved.length} items across ${sourceCount} source(s)`
     );
 
-    // Remove already-processed, rejected, and already-triaged items
+    // ── Step 4: Age filter ────────────────────────────────────────────────────
+    const cutoff = Date.now() - AGE_LIMIT_DAYS * 24 * 60 * 60 * 1000;
+    const aged   = interleaved.filter((item) =>
+      !item.pubDate || new Date(item.pubDate).getTime() >= cutoff
+    );
+
+    // ── Step 5: Remove already-processed / triaged / rejected URLs ────────────
     const pool: PoolItem[] = [];
-    for (const item of sorted) {
+    for (const item of aged) {
       if (rejectedUrls.has(item.link))     continue;
       if (this.triagedUrls.has(item.link)) continue;
       if (await this.isProcessed(item.link)) continue;

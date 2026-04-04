@@ -148,6 +148,58 @@ function shuffle<T>(arr: T[]): T[] {
   return arr;
 }
 
+/**
+ * Fair-Source Interleave Algorithm
+ *
+ * Solves feed dominance without hard per-source caps:
+ *   1. Groups all items by source feed (hostname).
+ *   2. Sorts each source's bucket newest-first.
+ *   3. Round-robin draw — takes the single freshest article from each source
+ *      in turn, loops back for the second freshest, and so on.
+ *   4. Depleted sources are skipped naturally; the loop ends when all buckets
+ *      are exhausted.
+ *
+ * Result: the first N items in the returned array are guaranteed to contain
+ * one article from each of the N active sources, so the first LLM triage
+ * batch always sees maximum publisher diversity.
+ */
+function fairSourceInterleave(items: PoolItem[]): PoolItem[] {
+  // Group by sourceFeed (already set to hostname by fetchFeed)
+  const buckets = new Map<string, PoolItem[]>();
+  for (const item of items) {
+    if (!buckets.has(item.sourceFeed)) buckets.set(item.sourceFeed, []);
+    buckets.get(item.sourceFeed)!.push(item);
+  }
+
+  // Sort each bucket newest-first
+  for (const bucket of buckets.values()) {
+    bucket.sort((a, b) => {
+      const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
+      const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
+      return tb - ta;
+    });
+  }
+
+  // Round-robin draw across all source buckets
+  const result:  PoolItem[]   = [];
+  const sources: PoolItem[][] = [...buckets.values()];
+  let drawIndex  = 0;
+  let keepDrawing = true;
+
+  while (keepDrawing) {
+    keepDrawing = false;
+    for (const bucket of sources) {
+      if (drawIndex < bucket.length) {
+        result.push(bucket[drawIndex]);
+        keepDrawing = true;
+      }
+    }
+    drawIndex++;
+  }
+
+  return result;
+}
+
 function emptyPillarCounts(): PillarCounts {
   return { anime: 0, gaming: 0, infotainment: 0, manga: 0, toys: 0 };
 }
@@ -475,16 +527,19 @@ Respond ONLY with the JSON object.`;
 
   /**
    * Fetch `feedUrls`, deduplicate, age-filter, remove already-processed/triaged
-   * items, and return up to `maxItems` candidates (freshest-first, shuffled).
+   * items, and return up to `maxItems` candidates ordered by the Fair-Source
+   * Interleave algorithm.
    *
-   * Anti-dominance algorithm:
-   *   1. Each feed is fetched concurrently and sorted by its own freshness.
-   *   2. Each feed contributes at most `perFeedCap` items — preventing a
-   *      single high-volume source (e.g. 4Gamer) from filling the entire pool.
-   *   3. All capped feed slices are merged and sorted by global freshness so
-   *      the final pool still surfaces the newest articles across all sources.
-   *   4. The freshest `maxItems` are shuffled before returning (anti-dominance
-   *      within the slice so no source clusters at the top of the triage queue).
+   * Pool construction:
+   *   1. All feeds are fetched concurrently.
+   *   2. Raw items are deduplicated by URL.
+   *   3. fairSourceInterleave() groups by source, sorts each bucket
+   *      newest-first, then round-robins across all sources so the pool
+   *      head always contains maximum publisher diversity.
+   *   4. Age filter and processed/triaged URL pruning are applied to the
+   *      interleaved order (preserving it).
+   *   5. The first `maxItems` survivors are returned — order is intentional,
+   *      no final shuffle (the interleaved order IS the fairness guarantee).
    *
    * @param feedUrls    - Which RSS feeds to fetch
    * @param ageDays     - Maximum article age in days
@@ -499,70 +554,53 @@ Respond ONLY with the JSON object.`;
     triagedUrls:  Set<string>,
     maxItems:     number = FRESH_POOL_SIZE
   ): Promise<PoolItem[]> {
-    // Fetch all feeds concurrently
+    // ── Step 1: Fetch all feeds concurrently ──────────────────────────────────
     const feedResults = await Promise.allSettled(
       feedUrls.map((url) => fetchFeed(url, 'anime'))
     );
 
-    // ── Per-feed cap ─────────────────────────────────────────────────────────
-    // Distribute the pool budget evenly across active feeds so no single
-    // high-volume source can monopolise the candidate set.
-    const activeFeedCount = feedResults.filter((r) => r.status === 'fulfilled').length;
-    const perFeedCap      = Math.max(5, Math.ceil(maxItems / Math.max(activeFeedCount, 1)));
-
-    const seenLinks   = new Set<string>();
-    const cappedItems: PoolItem[] = [];
+    // ── Step 2: Collect and deduplicate raw items ─────────────────────────────
+    const rawItems: PoolItem[] = [];
+    const seenLinks = new Set<string>();
 
     for (const result of feedResults) {
       if (result.status !== 'fulfilled') continue;
-
-      // Sort this feed's own items newest-first, then hard-cap
-      const feedSlice = result.value
-        .filter((item) => !seenLinks.has(item.link))
-        .sort((a, b) => {
-          const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
-          const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
-          return tb - ta;
-        })
-        .slice(0, perFeedCap);
-
-      for (const item of feedSlice) {
-        seenLinks.add(item.link);
-        cappedItems.push({
-          title:      item.title,
-          link:       item.link,
-          summary:    item.summary,
-          pubDate:    item.pubDate,
-          sourceFeed: item.sourceFeed,
-        });
+      for (const item of result.value) {
+        if (!seenLinks.has(item.link)) {
+          seenLinks.add(item.link);
+          rawItems.push({
+            title:      item.title,
+            link:       item.link,
+            summary:    item.summary,
+            pubDate:    item.pubDate,
+            sourceFeed: item.sourceFeed,
+          });
+        }
       }
     }
 
-    // ── Global freshness sort across all feeds ────────────────────────────────
-    const sorted = cappedItems.sort((a, b) => {
-      const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
-      const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
-      return tb - ta;
-    });
+    // ── Step 3: Fair-source interleave ────────────────────────────────────────
+    // Round-robin across source buckets (each sorted newest-first) so batch 1
+    // always contains one article from every active publisher.
+    const interleaved = fairSourceInterleave(rawItems);
 
+    const sourceCount = new Set(rawItems.map((i) => i.sourceFeed)).size;
+    this.log(
+      `[Scout] Fair-source interleave — ${interleaved.length} items across ${sourceCount} source(s)`
+    );
+
+    // ── Step 4: Age filter (preserves interleaved order) ─────────────────────
     const cutoff = Date.now() - ageDays * 24 * 60 * 60 * 1000;
-    const aged   = sorted.filter((item) =>
+    const aged   = interleaved.filter((item) =>
       !item.pubDate || new Date(item.pubDate).getTime() >= cutoff
     );
 
-    const dropped = sorted.length - aged.length;
+    const dropped = interleaved.length - aged.length;
     if (dropped > 0) {
       this.log(`[Scout] Age filter (${ageDays}d): ${dropped} stale items removed (${aged.length} remain)`);
     }
 
-    // Log per-feed contribution so dominance is visible in pipeline logs
-    const contrib = new Map<string, number>();
-    for (const item of aged) contrib.set(item.sourceFeed, (contrib.get(item.sourceFeed) ?? 0) + 1);
-    this.log(
-      `[Scout] Pool — ${aged.length} items, cap ${perFeedCap}/feed | ` +
-      [...contrib.entries()].map(([f, n]) => `${f}:${n}`).join(' ')
-    );
-
+    // ── Step 5: Remove already-processed / triaged URLs ───────────────────────
     const unprocessed: PoolItem[] = [];
     for (const item of aged) {
       if (rejectedUrls.has(item.link)) continue;
@@ -572,9 +610,8 @@ Respond ONLY with the JSON object.`;
       unprocessed.push(item);
     }
 
-    // Shuffle the freshest slice — hard stop at maxItems
-    const topFresh = unprocessed.slice(0, maxItems);
-    return shuffle(topFresh);
+    // Return up to maxItems — interleaved order preserved intentionally
+    return unprocessed.slice(0, maxItems);
   }
 
   /**
