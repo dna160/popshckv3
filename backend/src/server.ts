@@ -10,6 +10,7 @@ import cors from 'cors';
 import cron from 'node-cron';
 import path from 'path';
 import fs from 'fs';
+import { execSync } from 'child_process';
 import { PrismaClient } from '@prisma/client';
 import { marked } from 'marked';
 import dotenv from 'dotenv';
@@ -381,6 +382,22 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 // Start Server
 // ============================================================
 async function main(): Promise<void> {
+  // ── Apply database schema before anything else ────────────────
+  // Runs prisma db push at runtime so DATABASE_URL is guaranteed to
+  // be available (Railway injects env vars only at runtime, not build).
+  console.log('[DB] Applying schema to PostgreSQL...');
+  try {
+    execSync('npx prisma db push --accept-data-loss', {
+      stdio: 'inherit',
+      cwd: path.join(__dirname, '..'),  // backend root (where prisma/ lives)
+    });
+    console.log('[DB] Schema applied successfully.');
+  } catch (err) {
+    console.error('[DB] prisma db push failed — aborting startup:', err);
+    process.exit(1);
+  }
+  // ─────────────────────────────────────────────────────────────
+
   await prisma.$connect();
   console.log('[Server] Database connected.');
 
