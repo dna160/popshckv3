@@ -69,6 +69,48 @@ const MAX_SCOUT_ROUNDS    = 10;
 /** Consecutive empty Scout rounds before giving up on quota. */
 const MAX_SCOUT_EMPTY_ROUNDS = 3;
 
+/**
+ * Jaccard title-similarity threshold above which two articles are treated
+ * as covering the same topic.  0.30 means ~30% token overlap.
+ * e.g. "Tami Koi announces new single" vs "Tami Koi reveals debut album"
+ * → shared tokens: {tami, koi} / union of 6 unique tokens = 0.33 → DUPLICATE
+ */
+const DEDUP_SIMILARITY_THRESHOLD = 0.30;
+
+/**
+ * How far back to look in the Article DB when checking for cross-run
+ * topic duplicates.  Articles from the previous pipeline run that were
+ * published within this window will block a new article about the same topic.
+ */
+const DEDUP_WINDOW_HOURS = 8;
+
+// ── Topic-deduplication utilities ─────────────────────────────────────────────
+
+const DEDUP_STOP_WORDS = new Set([
+  // English
+  'the','a','an','is','are','was','were','of','in','on','at','to','for','by','with','and','or','new',
+  // Indonesian
+  'dan','yang','di','ke','dari','dengan','untuk','ini','itu','akan','telah','sudah','juga','baru','terbaru',
+]);
+
+/** Tokenise a title into a set of meaningful lowercase words. */
+function titleTokens(title: string): Set<string> {
+  return new Set(
+    title.toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .split(/\s+/)
+      .filter((t) => t.length > 2 && !DEDUP_STOP_WORDS.has(t))
+  );
+}
+
+/** Jaccard similarity between two token sets (0 = no overlap, 1 = identical). */
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersect = 0;
+  for (const t of a) if (b.has(t)) intersect++;
+  return intersect / (a.size + b.size - intersect);
+}
+
 // ── Shared copywriter interface ───────────────────────────────────────────────
 interface CopywriterAgent {
   readonly personaName: string;
@@ -117,6 +159,120 @@ export class Orchestrator {
 
   private checkAbort(): void {
     if (this.abortSignal?.aborted) throw new Error('ABORTED');
+  }
+
+  /**
+   * Topic-level deduplication across all pillar buckets.
+   *
+   * Two articles are considered duplicates when their titles share ≥30% token
+   * overlap (Jaccard).  Two dedup passes run in sequence:
+   *
+   *   Pass 1 — Cross-run memory (8-hour DB window):
+   *     Compare each bucket item against articles already published/processing
+   *     in the last DEDUP_WINDOW_HOURS.  If the DB already has an article about
+   *     "Tami Koi", new Scout items about "Tami Koi" are dropped.
+   *
+   *   Pass 2 — Within-batch dedup:
+   *     Compare bucket items against each other.  If Natalie, 4Gamer, and
+   *     Automaton all filed stories about "Tami Koi" in the same Scout sweep,
+   *     keep the first one encountered and drop the other two.
+   *
+   * Dropped items are discarded (not banked) since they represent genuinely
+   * redundant topics.  Any pillar whose count falls below TARGET after dedup
+   * will naturally trigger another Scout dispatch via the quota loop.
+   *
+   * @param buckets        Per-pillar candidate buckets (mutated in-place)
+   * @param recentTitles   Pre-fetched articles from the last 8 h (cross-run check)
+   * @param target         Per-pillar quota cap (used for log messages)
+   */
+  private deduplicateBuckets(
+    buckets:      Record<Pillar, ScoutItem[]>,
+    recentTitles: Array<{ title: string; pillar: string }>,
+    target:       number
+  ): void {
+    // Pre-tokenise recent DB articles grouped by pillar
+    const recentByPillar: Partial<Record<string, Array<{ title: string; tokens: Set<string> }>>> = {};
+    for (const article of recentTitles) {
+      if (!recentByPillar[article.pillar]) recentByPillar[article.pillar] = [];
+      recentByPillar[article.pillar]!.push({
+        title:  article.title,
+        tokens: titleTokens(article.title),
+      });
+    }
+
+    let totalRemoved = 0;
+
+    for (const pillar of PILLARS) {
+      const bucket = buckets[pillar];
+      if (bucket.length < 2) continue;
+
+      const tokenSets   = bucket.map((item) => titleTokens(item.title));
+      const isDuplicate = new Array<boolean>(bucket.length).fill(false);
+
+      // ── Pass 1: Cross-run memory check ─────────────────────────────────────
+      const recentForPillar = recentByPillar[pillar] ?? [];
+      for (let i = 0; i < bucket.length; i++) {
+        if (isDuplicate[i]) continue;
+        for (const recent of recentForPillar) {
+          const sim = jaccardSimilarity(tokenSets[i], recent.tokens);
+          if (sim >= DEDUP_SIMILARITY_THRESHOLD) {
+            isDuplicate[i] = true;
+            this.addLog(
+              `[Brain] Cross-run dup [${pillar}] (${(sim * 100).toFixed(0)}% match): ` +
+              `"${bucket[i].title}" already covered by recent → "${recent.title}"`,
+              'warn',
+              ORCHESTRATOR_IDENTITY
+            );
+            break;
+          }
+        }
+      }
+
+      // ── Pass 2: Within-batch dedup ─────────────────────────────────────────
+      for (let i = 0; i < bucket.length; i++) {
+        if (isDuplicate[i]) continue;
+        for (let j = i + 1; j < bucket.length; j++) {
+          if (isDuplicate[j]) continue;
+          const sim = jaccardSimilarity(tokenSets[i], tokenSets[j]);
+          if (sim >= DEDUP_SIMILARITY_THRESHOLD) {
+            isDuplicate[j] = true;
+            this.addLog(
+              `[Brain] Within-batch dup [${pillar}] (${(sim * 100).toFixed(0)}% match): ` +
+              `"${bucket[j].title}" dropped — duplicate of → "${bucket[i].title}"`,
+              'warn',
+              ORCHESTRATOR_IDENTITY
+            );
+          }
+        }
+      }
+
+      const kept:    ScoutItem[] = [];
+      const dropped: ScoutItem[] = [];
+      for (let i = 0; i < bucket.length; i++) {
+        (isDuplicate[i] ? dropped : kept).push(bucket[i]);
+      }
+
+      if (dropped.length > 0) {
+        buckets[pillar] = kept;
+        totalRemoved   += dropped.length;
+        this.addLog(
+          `[Brain] Dedup [${pillar}]: kept ${kept.length}, removed ${dropped.length} duplicate(s)` +
+          ` — bucket now ${kept.length}/${target}` +
+          (kept.length < target ? ` (${target - kept.length} more needed)` : ''),
+          'warn',
+          ORCHESTRATOR_IDENTITY
+        );
+      }
+    }
+
+    if (totalRemoved > 0) {
+      this.addLog(
+        `[Brain] Topic dedup complete — ${totalRemoved} duplicate(s) removed across all pillars. ` +
+        `Underquota check will re-dispatch Scout for any deficit pillars.`,
+        'info',
+        ORCHESTRATOR_IDENTITY
+      );
+    }
   }
 
   private addLog(
@@ -262,6 +418,22 @@ export class Orchestrator {
       );
     };
 
+    // ── Pre-fetch recent articles for cross-run topic dedup ──────────────────
+    // Queries articles created within the last DEDUP_WINDOW_HOURS so the Brain
+    // can prevent re-covering a topic from the previous pipeline run.
+    const dedupCutoff     = new Date(Date.now() - DEDUP_WINDOW_HOURS * 3_600_000);
+    const recentArticles  = await this.prisma.article.findMany({
+      where:  { createdAt: { gte: dedupCutoff }, status: { notIn: ['RED', 'FAILED'] } },
+      select: { title: true, pillar: true },
+    });
+    if (recentArticles.length > 0) {
+      this.addLog(
+        `[Brain] ${recentArticles.length} article(s) from the last ${DEDUP_WINDOW_HOURS}h loaded for topic deduplication.`,
+        'info',
+        ORCHESTRATOR_IDENTITY
+      );
+    }
+
     // ── Round 1: Broad scrape from PRIORITY_FEEDS ───────────────────────────
     this.addLog(
       `[Master] Initialising 50-slot quota (${TARGET}/pillar). Dispatching Scout — Round 1 (Broad Scrape)...`,
@@ -272,6 +444,7 @@ export class Orchestrator {
 
     const round1Topics = await this.scout.run({ mode: 'round_1' }, rejectedUrls);
     processHandover(round1Topics);
+    this.deduplicateBuckets(buckets, recentArticles, TARGET);
 
     // ── Underquota Protocol loop ────────────────────────────────────────────
     //
@@ -324,6 +497,7 @@ export class Orchestrator {
       } else {
         emptyRounds = 0;
         processHandover(newTopics);
+        this.deduplicateBuckets(buckets, recentArticles, TARGET);
       }
 
       scoutRound++;
