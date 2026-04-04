@@ -85,7 +85,7 @@ If the [Editor Notes] state that the images are broken, invalid, or flagged as "
 **STRICT WRITING RULES:**
 1. **Judul Artikel (MANDATORY — first line of output):** Before anything else, write the article title on its own line:
    \`**Judul:** [judul artikel di sini]\`
-   - Hard limit: **15 kata**. Hitung katamu sebelum menulis.
+   - Hard limit: **10 kata**. Hitung katamu sebelum menulis.
    - Harus frasa **utuh** — jangan dipotong di tengah kalimat.
    - Cerminkan gaya Rina: hangat, literér, terasa seperti rekomendasi dari sesama pembaca manga.
    - Contoh: *"Takehiko Inoue Kembali Berkarya, Dunia Manga Akhirnya Mendapat Kabar Baik"*
