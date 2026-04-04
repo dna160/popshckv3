@@ -6,6 +6,7 @@ import {
   getArticles,
   getPipelineStatus,
   getDashboardStats,
+  triggerPipeline,
   abortPipeline,
 } from '../api';
 
@@ -28,6 +29,7 @@ export const Dashboard: React.FC = () => {
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [error, setError] = useState<string | null>(null);
   const [aborting, setAborting] = useState(false);
+  const [triggering, setTriggering] = useState(false);
 
   const fetchAll = useCallback(async () => {
     try {
@@ -84,6 +86,28 @@ export const Dashboard: React.FC = () => {
               }`} />
               {pipelineStatus?.isRunning ? 'Running' : 'Idle'}
             </div>
+
+            {/* Run button — only shown while pipeline is idle */}
+            {!pipelineStatus?.isRunning && (
+              <button
+                onClick={async () => {
+                  setTriggering(true);
+                  try {
+                    await triggerPipeline();
+                    await fetchAll();
+                  } catch (err) {
+                    setError((err as Error).message);
+                  } finally {
+                    setTriggering(false);
+                  }
+                }}
+                disabled={triggering}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-newsroom-green/40 bg-newsroom-green/10 text-newsroom-green text-xs font-mono hover:bg-newsroom-green/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-newsroom-green" />
+                {triggering ? 'Starting…' : 'Run Pipeline'}
+              </button>
+            )}
 
             {/* Abort button — only shown while pipeline is running */}
             {pipelineStatus?.isRunning && (
