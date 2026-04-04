@@ -44,13 +44,15 @@ export async function runPipeline(): Promise<void> {
   isRunning = true;
   currentRunId = null;
 
-  const runnerPath = path.join(__dirname, 'pipeline-runner.ts');
+  const isDev = __filename.endsWith('.ts');
+  const runnerExt = isDev ? '.ts' : '.js';
+  const runnerPath = path.join(__dirname, `pipeline-runner${runnerExt}`);
+  const execArgv = isDev
+    ? ['--require', path.join(__dirname, '../node_modules/tsx/dist/cjs/index.cjs')]
+    : [];
   console.log('[ContinuousPipeline] Starting pipeline worker thread...');
 
-  worker = new Worker(runnerPath, {
-    // tsx registers itself as an experimental loader — use the same approach
-    execArgv: ['--require', path.join(__dirname, '../node_modules/tsx/dist/cjs/index.cjs')],
-  });
+  worker = new Worker(runnerPath, { execArgv });
 
   const pollTimer = startRunIdPoll();
 
