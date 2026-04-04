@@ -399,6 +399,16 @@ async function main(): Promise<void> {
 
   app.listen(PORT, () => {
     console.log(`[Server] Running on http://localhost:${PORT}`);
+
+    // ── Run pipeline once immediately on startup ──────────────────
+    const RUN_ON_STARTUP = process.env.PIPELINE_RUN_ON_STARTUP !== 'false';
+    if (RUN_ON_STARTUP) {
+      console.log('[Startup] Triggering initial pipeline run...');
+      runPipeline().catch((err) => {
+        console.error('[Startup] Initial pipeline run failed:', err);
+      });
+    }
+    // ─────────────────────────────────────────────────────────────
   });
 }
 
