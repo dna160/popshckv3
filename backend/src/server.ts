@@ -385,7 +385,7 @@ async function main(): Promise<void> {
   console.log('[Server] Database connected.');
 
   // ── Autonomous pipeline cron ──────────────────────────────────
-  const CRON_SCHEDULE = process.env.PIPELINE_CRON_SCHEDULE || '0 */4 * * *';
+  const CRON_SCHEDULE = process.env.PIPELINE_CRON_SCHEDULE || '0 */8 * * *';
   cron.schedule(CRON_SCHEDULE, async () => {
     console.log('[CRON] Initiating autonomous newsroom run...');
     try {
