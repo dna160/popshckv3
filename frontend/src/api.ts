@@ -1,6 +1,7 @@
 /**
  * API client for the Synthetic Newsroom backend.
- * Uses VITE_API_URL env var if set, otherwise falls back to the production backend URL.
+ * In production, vite preview proxies /api → backend Railway service.
+ * In dev, vite dev server proxies /api → localhost:3003.
  */
 
 import type {
@@ -10,8 +11,7 @@ import type {
   ApiResponse,
 } from './types';
 
-const BACKEND_URL = import.meta.env.VITE_API_URL || 'https://back-end-production-14be.up.railway.app';
-const BASE = `${BACKEND_URL}/api`;
+const BASE = '/api';
 
 async function request<T>(
   path: string,
