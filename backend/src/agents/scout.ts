@@ -477,8 +477,16 @@ Respond ONLY with the JSON object.`;
    * Fetch `feedUrls`, deduplicate, age-filter, remove already-processed/triaged
    * items, and return up to `maxItems` candidates (freshest-first, shuffled).
    *
-   * @param feedUrls    - Which RSS feeds to fetch (PRIORITY on Round 1,
-   *                      fallback RSS_FEEDS on Round 2+)
+   * Anti-dominance algorithm:
+   *   1. Each feed is fetched concurrently and sorted by its own freshness.
+   *   2. Each feed contributes at most `perFeedCap` items — preventing a
+   *      single high-volume source (e.g. 4Gamer) from filling the entire pool.
+   *   3. All capped feed slices are merged and sorted by global freshness so
+   *      the final pool still surfaces the newest articles across all sources.
+   *   4. The freshest `maxItems` are shuffled before returning (anti-dominance
+   *      within the slice so no source clusters at the top of the triage queue).
+   *
+   * @param feedUrls    - Which RSS feeds to fetch
    * @param ageDays     - Maximum article age in days
    * @param rejectedUrls - URLs the caller has explicitly ruled out
    * @param triagedUrls  - URLs already sent to the LLM this run (skip them)
@@ -491,32 +499,47 @@ Respond ONLY with the JSON object.`;
     triagedUrls:  Set<string>,
     maxItems:     number = FRESH_POOL_SIZE
   ): Promise<PoolItem[]> {
-    // Fetch all feeds concurrently; tag each item with 'anime' as a dummy pillar
-    // (the Scout's LLM triage assigns the real pillar — this field is unused here)
+    // Fetch all feeds concurrently
     const feedResults = await Promise.allSettled(
       feedUrls.map((url) => fetchFeed(url, 'anime'))
     );
 
-    const rawItems: PoolItem[] = [];
-    const seenLinks = new Set<string>();
+    // ── Per-feed cap ─────────────────────────────────────────────────────────
+    // Distribute the pool budget evenly across active feeds so no single
+    // high-volume source can monopolise the candidate set.
+    const activeFeedCount = feedResults.filter((r) => r.status === 'fulfilled').length;
+    const perFeedCap      = Math.max(5, Math.ceil(maxItems / Math.max(activeFeedCount, 1)));
+
+    const seenLinks   = new Set<string>();
+    const cappedItems: PoolItem[] = [];
+
     for (const result of feedResults) {
-      if (result.status === 'fulfilled') {
-        for (const item of result.value) {
-          if (!seenLinks.has(item.link)) {
-            seenLinks.add(item.link);
-            rawItems.push({
-              title:      item.title,
-              link:       item.link,
-              summary:    item.summary,
-              pubDate:    item.pubDate,
-              sourceFeed: item.sourceFeed,
-            });
-          }
-        }
+      if (result.status !== 'fulfilled') continue;
+
+      // Sort this feed's own items newest-first, then hard-cap
+      const feedSlice = result.value
+        .filter((item) => !seenLinks.has(item.link))
+        .sort((a, b) => {
+          const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
+          const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
+          return tb - ta;
+        })
+        .slice(0, perFeedCap);
+
+      for (const item of feedSlice) {
+        seenLinks.add(item.link);
+        cappedItems.push({
+          title:      item.title,
+          link:       item.link,
+          summary:    item.summary,
+          pubDate:    item.pubDate,
+          sourceFeed: item.sourceFeed,
+        });
       }
     }
 
-    const sorted = rawItems.sort((a, b) => {
+    // ── Global freshness sort across all feeds ────────────────────────────────
+    const sorted = cappedItems.sort((a, b) => {
       const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
       const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
       return tb - ta;
@@ -532,16 +555,24 @@ Respond ONLY with the JSON object.`;
       this.log(`[Scout] Age filter (${ageDays}d): ${dropped} stale items removed (${aged.length} remain)`);
     }
 
+    // Log per-feed contribution so dominance is visible in pipeline logs
+    const contrib = new Map<string, number>();
+    for (const item of aged) contrib.set(item.sourceFeed, (contrib.get(item.sourceFeed) ?? 0) + 1);
+    this.log(
+      `[Scout] Pool — ${aged.length} items, cap ${perFeedCap}/feed | ` +
+      [...contrib.entries()].map(([f, n]) => `${f}:${n}`).join(' ')
+    );
+
     const unprocessed: PoolItem[] = [];
     for (const item of aged) {
       if (rejectedUrls.has(item.link)) continue;
-      if (triagedUrls.has(item.link))  continue; // already evaluated this run — skip
+      if (triagedUrls.has(item.link))  continue;
       const seen = await this.isProcessed(item.link);
       if (seen) continue;
       unprocessed.push(item);
     }
 
-    // Shuffle the freshest slice up to the cap — hard stop at maxItems
+    // Shuffle the freshest slice — hard stop at maxItems
     const topFresh = unprocessed.slice(0, maxItems);
     return shuffle(topFresh);
   }

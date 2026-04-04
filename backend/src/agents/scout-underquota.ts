@@ -122,6 +122,11 @@ export class UnderquotaProtocol {
   /**
    * Fetch `feedUrls`, deduplicate, age-filter, skip already-processed /
    * already-triaged URLs, and return up to UNDERQUOTA_POOL_SIZE candidates.
+   *
+   * Anti-dominance algorithm (mirrors Scout.buildPool):
+   *   1. Each feed sorted by its own freshness, capped at `perFeedCap` items.
+   *   2. All capped slices merged and re-sorted by global freshness.
+   *   3. Ensures newly-added or low-volume feeds always get representation.
    */
   private async buildPool(
     feedUrls:     string[],
@@ -131,28 +136,40 @@ export class UnderquotaProtocol {
       feedUrls.map((url) => fetchFeed(url, 'anime'))
     );
 
-    const rawItems: PoolItem[] = [];
-    const seenLinks = new Set<string>();
+    // ── Per-feed cap ─────────────────────────────────────────────────────────
+    const activeFeedCount = feedResults.filter((r) => r.status === 'fulfilled').length;
+    const perFeedCap      = Math.max(5, Math.ceil(UNDERQUOTA_POOL_SIZE / Math.max(activeFeedCount, 1)));
+
+    const seenLinks   = new Set<string>();
+    const cappedItems: PoolItem[] = [];
 
     for (const result of feedResults) {
       if (result.status !== 'fulfilled') continue;
-      for (const item of result.value) {
-        if (!seenLinks.has(item.link)) {
-          seenLinks.add(item.link);
-          rawItems.push({
-            title:      item.title,
-            link:       item.link,
-            summary:    item.summary,
-            pubDate:    item.pubDate,
-            sourceFeed: item.sourceFeed,
-          });
-        }
+
+      const feedSlice = result.value
+        .filter((item) => !seenLinks.has(item.link))
+        .sort((a, b) => {
+          const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
+          const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
+          return tb - ta;
+        })
+        .slice(0, perFeedCap);
+
+      for (const item of feedSlice) {
+        seenLinks.add(item.link);
+        cappedItems.push({
+          title:      item.title,
+          link:       item.link,
+          summary:    item.summary,
+          pubDate:    item.pubDate,
+          sourceFeed: item.sourceFeed,
+        });
       }
     }
 
-    // Sort newest-first then apply age filter
+    // ── Global freshness sort + age filter ────────────────────────────────────
     const cutoff = Date.now() - AGE_LIMIT_DAYS * 24 * 60 * 60 * 1000;
-    const sorted = rawItems
+    const sorted = cappedItems
       .sort((a, b) => {
         const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
         const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
@@ -160,10 +177,18 @@ export class UnderquotaProtocol {
       })
       .filter((item) => !item.pubDate || new Date(item.pubDate).getTime() >= cutoff);
 
+    // Log per-feed contribution
+    const contrib = new Map<string, number>();
+    for (const item of sorted) contrib.set(item.sourceFeed, (contrib.get(item.sourceFeed) ?? 0) + 1);
+    this.log(
+      `[Underquota] Pool — ${sorted.length} items, cap ${perFeedCap}/feed | ` +
+      [...contrib.entries()].map(([f, n]) => `${f}:${n}`).join(' ')
+    );
+
     // Remove already-processed, rejected, and already-triaged items
     const pool: PoolItem[] = [];
     for (const item of sorted) {
-      if (rejectedUrls.has(item.link))    continue;
+      if (rejectedUrls.has(item.link))     continue;
       if (this.triagedUrls.has(item.link)) continue;
       if (await this.isProcessed(item.link)) continue;
       pool.push(item);
