@@ -7,14 +7,14 @@
  * soundtracks, and the anime industry as a whole.
  *
  * Pillar : Japanese Anime
- * WP Author ID : 2
+ * WP Author ID : 10 (Harry Kaguya)
  */
 
 import { chat } from '../../../services/llm';
 import type { ResearchedItem, DraftArticle, ArticleImage } from '../../../../../shared/types';
 
 export const PERSONA_NAME = 'Satoshi';
-export const WP_AUTHOR_ID = 2;
+export const WP_AUTHOR_ID = 10; // Harry Kaguya
 
 export class AnimeSatoshi {
   readonly personaName = PERSONA_NAME;

@@ -7,14 +7,14 @@
  * and infectious passion to every piece.
  *
  * Pillar : Japanese Manga
- * WP Author ID : 5
+ * WP Author ID : 11 (Steven Nelson)
  */
 
 import { chat } from '../../../services/llm';
 import type { ResearchedItem, DraftArticle, ArticleImage } from '../../../../../shared/types';
 
 export const PERSONA_NAME = 'Rina';
-export const WP_AUTHOR_ID = 5;
+export const WP_AUTHOR_ID = 11; // Steven Nelson
 
 export class MangaRina {
   readonly personaName = PERSONA_NAME;

@@ -42,18 +42,18 @@ const wpCategoryMap: Record<Pillar, number> = {
  * Pillar → WordPress Author ID mapping.
  * Must stay in sync with AUTHOR_IDS in publisher/tools/wp_api_client.ts.
  *
- *   anime        → 2   (Satoshi)
- *   gaming       → 7   (Hikari    — WP user: MRYAKUZA)
- *   infotainment → 9   (Kenji     — WP user: LISAKAGAWA)
- *   manga        → 5   (Rina)
- *   toys         → 8   (Taro      — WP user: FINALHERO)
+ *   anime        → 10  (Satoshi   — WP user: Harry Kaguya)
+ *   gaming       → 7   (Hikari    — WP user: MRYAKUZA Pantheon)
+ *   infotainment → 9   (Kenji     — WP user: Lisa Kagawa)
+ *   manga        → 11  (Rina      — WP user: Steven Nelson)
+ *   toys         → 8   (Taro      — WP user: FINALHERO Pantheon)
  */
 const wpAuthorMap: Record<Pillar, number> = {
-  anime:         2,
-  gaming:        7,
-  infotainment:  9,
-  manga:         5,
-  toys:          8,
+  anime:         10, // Harry Kaguya
+  gaming:        7,  // MRYAKUZA Pantheon
+  infotainment:  9,  // Lisa Kagawa
+  manga:         11, // Steven Nelson
+  toys:          8,  // FINALHERO Pantheon
 };
 
 function getAuthHeader(): string {

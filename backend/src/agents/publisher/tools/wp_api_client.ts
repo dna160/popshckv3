@@ -6,22 +6,22 @@
  * - Post creation with author ID and category assignment
  *
  * Author–WP User ID mapping (matches persona names from specialized copywriters):
- *   Satoshi → 2  (Anime)
- *   Hikari  → 7  (Gaming)       WP user: MRYAKUZA
- *   Kenji   → 9  (Infotainment) WP user: LISAKAGAWA
- *   Rina    → 5  (Manga)
- *   Taro    → 8  (Toys/Collectibles) WP user: FINALHERO
+ *   Satoshi → 10 (Anime)        WP user: Harry Kaguya
+ *   Hikari  → 7  (Gaming)       WP user: MRYAKUZA Pantheon
+ *   Kenji   → 9  (Infotainment) WP user: Lisa Kagawa
+ *   Rina    → 11 (Manga)        WP user: Steven Nelson
+ *   Taro    → 8  (Toys/Collectibles) WP user: FINALHERO Pantheon
  */
 
 import type { ArticleImage, Pillar } from '../../../../../shared/types';
 
 // ── Author ID mapping ─────────────────────────────────────────────────────────
 export const AUTHOR_IDS: Record<string, number> = {
-  Satoshi: 2,
-  Hikari:  7,  // WP user: MRYAKUZA
-  Kenji:   9,  // WP user: LISAKAGAWA
-  Rina:    5,
-  Taro:    8,  // WP user: FINALHERO
+  Satoshi: 10, // WP user: Harry Kaguya
+  Hikari:   7, // WP user: MRYAKUZA Pantheon
+  Kenji:    9, // WP user: Lisa Kagawa
+  Rina:    11, // WP user: Steven Nelson
+  Taro:     8, // WP user: FINALHERO Pantheon
 };
 
 // ── Category ID mapping ───────────────────────────────────────────────────────
