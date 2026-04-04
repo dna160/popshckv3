@@ -385,53 +385,68 @@ async function main(): Promise<void> {
   console.log('[Server] Database connected.');
 
   // ── Ensure all tables exist (idempotent raw SQL) ──────────────
-  // prisma db push requires the CLI at runtime which isn't reliable
-  // in compiled Railway deployments. Raw SQL with IF NOT EXISTS is
-  // guaranteed to work as long as the DB connection is live.
   console.log('[DB] Ensuring tables exist...');
-  await prisma.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS "Article" (
-      "id"            TEXT        NOT NULL,
-      "title"         TEXT        NOT NULL,
-      "pillar"        TEXT        NOT NULL,
-      "sourceUrl"     TEXT        NOT NULL,
-      "status"        TEXT        NOT NULL DEFAULT 'PROCESSING',
-      "revisionCount" INTEGER     NOT NULL DEFAULT 0,
-      "content"       TEXT,
-      "contentHtml"   TEXT,
-      "images"        TEXT,
-      "editorNotes"   TEXT,
-      "wpPostId"      INTEGER,
-      "wpPostUrl"     TEXT,
-      "createdAt"     TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      "updatedAt"     TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      CONSTRAINT "Article_pkey" PRIMARY KEY ("id")
-    );
-  `);
-  await prisma.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS "ProcessedUrl" (
-      "id"        TEXT         NOT NULL,
-      "url"       TEXT         NOT NULL,
-      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      CONSTRAINT "ProcessedUrl_pkey" PRIMARY KEY ("id")
-    );
-  `);
-  await prisma.$executeRawUnsafe(`
-    CREATE UNIQUE INDEX IF NOT EXISTS "ProcessedUrl_url_key"
-    ON "ProcessedUrl"("url");
-  `);
-  await prisma.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS "PipelineRun" (
-      "id"                TEXT         NOT NULL,
-      "status"            TEXT         NOT NULL,
-      "articlesProcessed" INTEGER      NOT NULL DEFAULT 0,
-      "startedAt"         TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      "completedAt"       TIMESTAMP(3),
-      "logs"              TEXT,
-      CONSTRAINT "PipelineRun_pkey" PRIMARY KEY ("id")
-    );
-  `);
-  console.log('[DB] Tables ready.');
+  const migrations: Array<{ name: string; sql: string }> = [
+    {
+      name: 'Article',
+      sql: `
+        CREATE TABLE IF NOT EXISTS "Article" (
+          "id"            TEXT         NOT NULL,
+          "title"         TEXT         NOT NULL,
+          "pillar"        TEXT         NOT NULL,
+          "sourceUrl"     TEXT         NOT NULL,
+          "status"        TEXT         NOT NULL DEFAULT 'PROCESSING',
+          "revisionCount" INTEGER      NOT NULL DEFAULT 0,
+          "content"       TEXT,
+          "contentHtml"   TEXT,
+          "images"        TEXT,
+          "editorNotes"   TEXT,
+          "wpPostId"      INTEGER,
+          "wpPostUrl"     TEXT,
+          "createdAt"     TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "updatedAt"     TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT "Article_pkey" PRIMARY KEY ("id")
+        )`,
+    },
+    {
+      name: 'ProcessedUrl',
+      sql: `
+        CREATE TABLE IF NOT EXISTS "ProcessedUrl" (
+          "id"        TEXT         NOT NULL,
+          "url"       TEXT         NOT NULL,
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT "ProcessedUrl_pkey" PRIMARY KEY ("id")
+        )`,
+    },
+    {
+      name: 'ProcessedUrl_url_key (unique index)',
+      sql: `CREATE UNIQUE INDEX IF NOT EXISTS "ProcessedUrl_url_key" ON "ProcessedUrl"("url")`,
+    },
+    {
+      name: 'PipelineRun',
+      sql: `
+        CREATE TABLE IF NOT EXISTS "PipelineRun" (
+          "id"                TEXT         NOT NULL,
+          "status"            TEXT         NOT NULL,
+          "articlesProcessed" INTEGER      NOT NULL DEFAULT 0,
+          "startedAt"         TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "completedAt"       TIMESTAMP(3),
+          "logs"              TEXT,
+          CONSTRAINT "PipelineRun_pkey" PRIMARY KEY ("id")
+        )`,
+    },
+  ];
+
+  for (const { name, sql } of migrations) {
+    try {
+      await prisma.$executeRawUnsafe(sql);
+      console.log(`[DB] ✓ ${name}`);
+    } catch (err) {
+      console.error(`[DB] ✗ ${name}:`, (err as Error).message);
+      throw err; // abort startup — server must not run without tables
+    }
+  }
+  console.log('[DB] All tables ready.');
   // ─────────────────────────────────────────────────────────────
 
   // ── Autonomous pipeline cron ──────────────────────────────────
