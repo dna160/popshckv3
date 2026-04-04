@@ -1,0 +1,16 @@
+[phases.install]
+cmds = [
+  "npm install --prefix frontend",
+  "npm install --prefix backend"
+]
+
+[phases.build]
+cmds = [
+  "npm run build --prefix frontend",
+  "cp -r frontend/dist backend/public",
+  "npx --prefix backend prisma generate",
+  "npm run build --prefix backend"
+]
+
+[start]
+cmd = "node backend/dist/server.js"
