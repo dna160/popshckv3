@@ -22,7 +22,7 @@ const prisma = new PrismaClient();
 const PORT = Number(process.env.PORT) || 3001;
 
 // Middleware
-app.use(cors({ origin: true, credentials: true }));
+app.use(cors({ origin: '*', methods: ['GET','POST','PATCH','DELETE','OPTIONS'] }));
 app.use(express.json());
 
 // ============================================================
