@@ -353,6 +353,23 @@ app.get('/api/dashboard/stats', async (_req: Request, res: Response) => {
 });
 
 // ============================================================
+// Serve frontend static files (built into ../public relative to dist/)
+// Falls back to a JSON health-check when public dir isn't present.
+// ============================================================
+const publicDir = path.join(__dirname, '..', 'public');
+if (fs.existsSync(publicDir)) {
+  app.use(express.static(publicDir));
+  app.get('*', (_req: Request, res: Response) => {
+    res.sendFile(path.join(publicDir, 'index.html'));
+  });
+  console.log('[Server] Serving frontend from', publicDir);
+} else {
+  app.get('/', (_req: Request, res: Response) => {
+    res.json({ status: 'ok', service: 'synthetic-newsroom-backend', api: '/api' });
+  });
+}
+
+// ============================================================
 // Error Handler
 // ============================================================
 // Serve frontend static files (built into ../public relative to dist/)
