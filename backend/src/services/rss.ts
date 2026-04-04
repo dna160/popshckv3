@@ -4,7 +4,7 @@ import type { Pillar } from '../shared/types';
 const parser = new Parser({
   timeout: 10000,
   headers: {
-    'User-Agent': 'SyntheticNewsroom/1.0 RSS Reader',
+    'User-Agent': 'Mozilla/5.0 (compatible; SyntheticNewsroom/1.0; +https://github.com/dna160/popshckv3)',
   },
 });
 
@@ -36,37 +36,26 @@ export interface FeedConfig {
  * Entries with a single specific tag (e.g. tags: ['manga']) are subpillar
  * branches. The Underquota Protocol filters this list by tag to build a
  * targeted pool for exactly the deficit pillar(s).
- *
- * e.g. natalie.mu/comic → tagged ['manga'] → activated when manga is underquota
  */
 export const PRIORITY_FEEDS: FeedConfig[] = [
   // ── General / mixed-topic (Round 1 broad net) ──────────────────────────────
-  { url: 'https://automaton-media.com/feed/',             tags: ['gaming', 'anime', 'manga']               },
-  { url: 'https://www.4gamer.net/rss/index.xml',          tags: ['gaming']                                 },
-  { url: 'https://hobby.dengeki.com/feed/',               tags: ['toys', 'anime']                          },
-  { url: 'https://chaosphere.hostdon.jp/@natalie.rss',    tags: ['anime', 'manga', 'gaming', 'infotainment'] },
-  { url: 'https://news.denfaminicogamer.jp/feed',         tags: ['gaming', 'anime', 'manga']               },
-  { url: 'https://essential-japan.com/feed/',             tags: ['infotainment']                           },
-  { url: 'https://www.toy-people.com/rss.php',            tags: ['toys']                                   },
+  { url: 'https://automaton-media.com/feed/',                                    tags: ['gaming', 'anime', 'manga']                },
+  { url: 'https://www.4gamer.net/rss/index.xml',                                 tags: ['gaming']                                  },
+  { url: 'https://hobby.dengeki.com/feed/',                                      tags: ['toys', 'anime']                           },
+  { url: 'https://chaosphere.hostdon.jp/@natalie.rss',                           tags: ['anime', 'manga', 'gaming', 'infotainment'] },
+  { url: 'https://news.denfaminicogamer.jp/feed',                                tags: ['gaming', 'anime', 'manga']                },
+  { url: 'https://essential-japan.com/feed/',                                    tags: ['infotainment']                            },
+  { url: 'https://www.animenewsnetwork.com/all/rss.xml?ann-edition=us',          tags: ['anime', 'manga']                          },
 
   // ── Subpillar-specific branches (Underquota Protocol — Tier 1) ─────────────
   // Manga
-  { url: 'https://natalie.mu/comic/feed',                 tags: ['manga']                                  },
+  { url: 'https://rss-mstdn.studiofreesia.com/@natalie_mu_comic.rss',            tags: ['manga']                                   },
   // Anime
-  { url: 'https://natalie.mu/anime/feed',                 tags: ['anime']                                  },
+  { url: 'https://rss-mstdn.studiofreesia.com/@animeanime.rss',                  tags: ['anime']                                   },
   // Gaming
-  { url: 'https://natalie.mu/game/feed',                  tags: ['gaming']                                 },
-  // Infotainment
-  { url: 'https://natalie.mu/music/feed',                 tags: ['infotainment']                           },
-  // Toys / Collectibles
-  { url: 'https://www.amiami.com/eng/rss/newitem.xml',    tags: ['toys']                                   },
-
-  // ── Tokyo Hive + Oricon (General/Infotainment) ──────────────────────────────
-  { url: 'https://feeds.feedburner.com/tokyohive',         tags: ['infotainment', 'anime']                  },
-  { url: 'https://www.oricon.co.jp/rss/news/',             tags: ['infotainment']                           },
-  { url: 'https://www.oricon.co.jp/rss/music/',            tags: ['infotainment']                           },
-  { url: 'https://www.oricon.co.jp/rss/movie/',            tags: ['infotainment', 'anime']                  },
-  { url: 'https://www.oricon.co.jp/rss/special/',          tags: ['infotainment']                           },
+  { url: 'https://rss-mstdn.studiofreesia.com/@gamespark.rss',                   tags: ['gaming']                                  },
+  // Infotainment — Oricon news via Mastodon proxy (last confirmed active 2025-11)
+  { url: 'https://rss-mstdn.studiofreesia.com/@oricon_news.rss',                 tags: ['infotainment']                            },
 ];
 
 /**
@@ -75,38 +64,32 @@ export const PRIORITY_FEEDS: FeedConfig[] = [
  * Activated ONLY when the Master Orchestrator detects a quota deficit after
  * Round 1. The Scout switches from the broad net to a "sniper" approach,
  * fetching exclusively from hyper-specific feeds that match the missing pillars.
- *
- * Rules:
- *   - Only feeds for the missing_pillars are fetched; others are ignored.
- *   - LLM triage strictly filters results to the target pillar(s) only.
- *   - Pool size: 50 items (RETRY_POOL_SIZE) per dispatch.
- *
- * Tier 3 (fallback_protocol) re-uses these same feeds but sweeps ALL pillars,
- * sorted by FeedMemory score, when both Round 1 and Underquota have failed.
- *
- * Feed sources match the README Content Pillars table (source of truth).
  */
 export const RSS_FEEDS: Record<Pillar, string[]> = {
   anime: [
-    'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) [anime] [manga] [gaming] [infotainment]
+    'https://chaosphere.hostdon.jp/@natalie.rss',                         // Natalie (Mastodon proxy)
+    'https://rss-mstdn.studiofreesia.com/@animeanime.rss',                // Anime!Anime! (Mastodon proxy)
+    'https://www.animenewsnetwork.com/all/rss.xml?ann-edition=us',        // Anime News Network
   ],
   gaming: [
-    'https://automaton-media.com/feed/',                // Automaton               [gaming] [anime] [manga]
-    'https://www.4gamer.net/rss/index.xml',             // 4Gamer                  [gaming]
-    'https://news.denfaminicogamer.jp/feed',             // Denfami                 [gaming] [anime] [manga]
+    'https://automaton-media.com/feed/',                                  // Automaton
+    'https://www.4gamer.net/rss/index.xml',                               // 4Gamer
+    'https://news.denfaminicogamer.jp/feed',                              // Denfami
+    'https://rss-mstdn.studiofreesia.com/@gamespark.rss',                 // Game*Spark (Mastodon proxy)
   ],
   infotainment: [
-    'https://essential-japan.com/feed/',                // Essential Japan         [infotainment]
-    'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) [infotainment] [anime] [manga]
+    'https://essential-japan.com/feed/',                                  // Essential Japan
+    'https://chaosphere.hostdon.jp/@natalie.rss',                         // Natalie (Mastodon proxy)
+    'https://rss-mstdn.studiofreesia.com/@oricon_news.rss',               // Oricon News (Mastodon proxy)
   ],
   manga: [
-    'https://automaton-media.com/feed/',                // Automaton               [gaming] [anime] [manga]
-    'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) [anime] [manga]
-    'https://news.denfaminicogamer.jp/feed',             // Denfami                 [gaming] [anime] [manga]
+    'https://automaton-media.com/feed/',                                  // Automaton
+    'https://chaosphere.hostdon.jp/@natalie.rss',                         // Natalie (Mastodon proxy)
+    'https://news.denfaminicogamer.jp/feed',                              // Denfami
+    'https://rss-mstdn.studiofreesia.com/@natalie_mu_comic.rss',          // Comic Natalie (Mastodon proxy)
   ],
   toys: [
-    'https://hobby.dengeki.com/feed/',                  // Dengeki Hobby           [toys] [anime]
-    'https://www.toy-people.com/rss.php',               // Toy People News         [toys]
+    'https://hobby.dengeki.com/feed/',                                    // Dengeki Hobby
   ],
 };
 
@@ -115,9 +98,9 @@ export const RSS_FEEDS: Record<Pillar, string[]> = {
  * Returns array of RssItems (may be empty on failure).
  */
 /**
- * For Mastodon-proxy feeds (e.g. Natalie via chaosphere.hostdon.jp),
- * items have no <title>. Extract a title and the real article URL from
- * the HTML description instead.
+ * For Mastodon-proxy feeds (e.g. Natalie via chaosphere.hostdon.jp or
+ * rss-mstdn.studiofreesia.com), items have no <title>. Extract a title and
+ * the real article URL from the HTML description instead.
  */
 function extractFromMastodonDescription(
   html: string,
@@ -128,7 +111,7 @@ function extractFromMastodonDescription(
   // Remove leading 【 #tag #tag 】 section
   const cleaned = text.replace(/^【[^】]*】\s*/, '').trim();
   // Find the first real article URL embedded in an <a href>
-  const urlMatch = html.match(/href="(https?:\/\/(?!chaosphere)[^"]+)"/);
+  const urlMatch = html.match(/href="(https?:\/\/(?!chaosphere)(?!rss-mstdn)[^"]+)"/);
   const articleLink = urlMatch ? urlMatch[1] : fallbackLink;
   // Title is everything before the URL at the end of the cleaned text
   const title = cleaned.replace(/https?:\/\/\S+/g, '').trim() || cleaned.slice(0, 120);
@@ -141,7 +124,10 @@ export async function fetchFeed(url: string, pillar: Pillar): Promise<RssItem[]>
 
   try {
     const feed = await parser.parseURL(url);
-    const isMastodonFeed = url.includes('hostdon.jp') || url.includes('mastodon');
+    const isMastodonFeed =
+      url.includes('hostdon.jp') ||
+      url.includes('mastodon') ||
+      url.includes('studiofreesia.com');
 
     return (feed.items || [])
       .filter((item) => item.link || item.guid)
