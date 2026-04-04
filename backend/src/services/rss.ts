@@ -60,6 +60,13 @@ export const PRIORITY_FEEDS: FeedConfig[] = [
   { url: 'https://natalie.mu/music/feed',                 tags: ['infotainment']                           },
   // Toys / Collectibles
   { url: 'https://www.amiami.com/eng/rss/newitem.xml',    tags: ['toys']                                   },
+
+  // ── Tokyo Hive + Oricon (General/Infotainment) ──────────────────────────────
+  { url: 'https://feeds.feedburner.com/tokyohive',         tags: ['infotainment', 'anime']                  },
+  { url: 'https://www.oricon.co.jp/rss/news/',             tags: ['infotainment']                           },
+  { url: 'https://www.oricon.co.jp/rss/music/',            tags: ['infotainment']                           },
+  { url: 'https://www.oricon.co.jp/rss/movie/',            tags: ['infotainment', 'anime']                  },
+  { url: 'https://www.oricon.co.jp/rss/special/',          tags: ['infotainment']                           },
 ];
 
 /**
