@@ -1,6 +1,6 @@
 /**
  * API client for the Synthetic Newsroom backend.
- * All calls go through the Vite proxy to /api on localhost:3001.
+ * Uses VITE_API_URL env var if set, otherwise falls back to the production backend URL.
  */
 
 import type {
@@ -10,7 +10,8 @@ import type {
   ApiResponse,
 } from './types';
 
-const BASE = (import.meta.env.VITE_API_URL ?? '') + '/api';
+const BACKEND_URL = import.meta.env.VITE_API_URL || 'https://back-end-production-14be.up.railway.app';
+const BASE = `${BACKEND_URL}/api`;
 
 async function request<T>(
   path: string,
@@ -24,7 +25,7 @@ async function request<T>(
   // Handle non-JSON responses (e.g. proxy 404 when backend is down)
   const contentType = res.headers.get('content-type') ?? '';
   if (!contentType.includes('application/json')) {
-    throw new Error(`Backend unavailable (HTTP ${res.status}). Is the server running on port 3001?`);
+    throw new Error(`Backend unavailable (HTTP ${res.status}). Check that the backend service is running.`);
   }
 
   const json = (await res.json()) as ApiResponse<T>;

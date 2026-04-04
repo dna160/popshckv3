@@ -157,7 +157,7 @@ export const Dashboard: React.FC = () => {
       {error && (
         <div className="bg-newsroom-red/10 border-b border-newsroom-red/20 px-4 py-2">
           <p className="text-xs text-newsroom-red font-mono max-w-screen-2xl mx-auto">
-            API Error: {error} — Is the backend running on port 3001?
+            API Error: {error}
           </p>
         </div>
       )}
