@@ -10,7 +10,6 @@ import cors from 'cors';
 import cron from 'node-cron';
 import path from 'path';
 import fs from 'fs';
-import { execSync } from 'child_process';
 import { PrismaClient } from '@prisma/client';
 import { marked } from 'marked';
 import dotenv from 'dotenv';
@@ -382,24 +381,58 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 // Start Server
 // ============================================================
 async function main(): Promise<void> {
-  // ── Apply database schema before anything else ────────────────
-  // Runs prisma db push at runtime so DATABASE_URL is guaranteed to
-  // be available (Railway injects env vars only at runtime, not build).
-  console.log('[DB] Applying schema to PostgreSQL...');
-  try {
-    execSync('npx prisma db push --accept-data-loss', {
-      stdio: 'inherit',
-      cwd: path.join(__dirname, '..'),  // backend root (where prisma/ lives)
-    });
-    console.log('[DB] Schema applied successfully.');
-  } catch (err) {
-    console.error('[DB] prisma db push failed — aborting startup:', err);
-    process.exit(1);
-  }
-  // ─────────────────────────────────────────────────────────────
-
   await prisma.$connect();
   console.log('[Server] Database connected.');
+
+  // ── Ensure all tables exist (idempotent raw SQL) ──────────────
+  // prisma db push requires the CLI at runtime which isn't reliable
+  // in compiled Railway deployments. Raw SQL with IF NOT EXISTS is
+  // guaranteed to work as long as the DB connection is live.
+  console.log('[DB] Ensuring tables exist...');
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "Article" (
+      "id"            TEXT        NOT NULL,
+      "title"         TEXT        NOT NULL,
+      "pillar"        TEXT        NOT NULL,
+      "sourceUrl"     TEXT        NOT NULL,
+      "status"        TEXT        NOT NULL DEFAULT 'PROCESSING',
+      "revisionCount" INTEGER     NOT NULL DEFAULT 0,
+      "content"       TEXT,
+      "contentHtml"   TEXT,
+      "images"        TEXT,
+      "editorNotes"   TEXT,
+      "wpPostId"      INTEGER,
+      "wpPostUrl"     TEXT,
+      "createdAt"     TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt"     TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "Article_pkey" PRIMARY KEY ("id")
+    );
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "ProcessedUrl" (
+      "id"        TEXT         NOT NULL,
+      "url"       TEXT         NOT NULL,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "ProcessedUrl_pkey" PRIMARY KEY ("id")
+    );
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE UNIQUE INDEX IF NOT EXISTS "ProcessedUrl_url_key"
+    ON "ProcessedUrl"("url");
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "PipelineRun" (
+      "id"                TEXT         NOT NULL,
+      "status"            TEXT         NOT NULL,
+      "articlesProcessed" INTEGER      NOT NULL DEFAULT 0,
+      "startedAt"         TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "completedAt"       TIMESTAMP(3),
+      "logs"              TEXT,
+      CONSTRAINT "PipelineRun_pkey" PRIMARY KEY ("id")
+    );
+  `);
+  console.log('[DB] Tables ready.');
+  // ─────────────────────────────────────────────────────────────
 
   // ── Autonomous pipeline cron ──────────────────────────────────
   const CRON_SCHEDULE = process.env.PIPELINE_CRON_SCHEDULE || '0 */8 * * *';
