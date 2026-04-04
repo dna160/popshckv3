@@ -14,6 +14,7 @@ export interface WpPostPayload {
   categories?: number[];
   tags?: number[];
   featured_media?: number;
+  author?: number;
   meta?: Record<string, unknown>;
 }
 
@@ -35,6 +36,24 @@ const wpCategoryMap: Record<Pillar, number> = {
   infotainment: 10, // Infotainment
   manga: 14,        // Comic (no dedicated Manga category)
   toys: 12,         // Toys
+};
+
+/**
+ * Pillar → WordPress Author ID mapping.
+ * Must stay in sync with AUTHOR_IDS in publisher/tools/wp_api_client.ts.
+ *
+ *   anime        → 2   (Satoshi)
+ *   gaming       → 7   (Hikari    — WP user: MRYAKUZA)
+ *   infotainment → 9   (Kenji     — WP user: LISAKAGAWA)
+ *   manga        → 5   (Rina)
+ *   toys         → 8   (Taro      — WP user: FINALHERO)
+ */
+const wpAuthorMap: Record<Pillar, number> = {
+  anime:         2,
+  gaming:        7,
+  infotainment:  9,
+  manga:         5,
+  toys:          8,
 };
 
 function getAuthHeader(): string {
@@ -189,6 +208,7 @@ export async function publishArticle(
   }
 
   const categoryId = pillar ? wpCategoryMap[pillar] : undefined;
+  const authorId   = pillar ? wpAuthorMap[pillar]   : undefined;
 
   const post = await createPost({
     title,
@@ -196,6 +216,7 @@ export async function publishArticle(
     status: 'publish',
     featured_media: featuredMediaId,
     ...(categoryId !== undefined ? { categories: [categoryId] } : {}),
+    ...(authorId   !== undefined ? { author: authorId }         : {}),
   });
 
   return {
