@@ -7,6 +7,9 @@
 
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
+import cron from 'node-cron';
+import path from 'path';
+import fs from 'fs';
 import { PrismaClient } from '@prisma/client';
 import { marked } from 'marked';
 import dotenv from 'dotenv';
@@ -21,7 +24,7 @@ const prisma = new PrismaClient();
 const PORT = Number(process.env.PORT) || 3001;
 
 // Middleware
-app.use(cors());
+app.use(cors({ origin: '*', methods: ['GET','POST','PATCH','DELETE','OPTIONS'] }));
 app.use(express.json());
 
 // ============================================================
@@ -350,6 +353,23 @@ app.get('/api/dashboard/stats', async (_req: Request, res: Response) => {
 });
 
 // ============================================================
+// Serve frontend static files (built into ../public relative to dist/)
+// Falls back to a JSON health-check when public dir isn't present.
+// ============================================================
+const publicDir = path.join(__dirname, '..', 'public');
+if (fs.existsSync(publicDir)) {
+  app.use(express.static(publicDir));
+  app.get('*', (_req: Request, res: Response) => {
+    res.sendFile(path.join(publicDir, 'index.html'));
+  });
+  console.log('[Server] Serving frontend from', publicDir);
+} else {
+  app.get('/', (_req: Request, res: Response) => {
+    res.json({ status: 'ok', service: 'synthetic-newsroom-backend', api: '/api' });
+  });
+}
+
+// ============================================================
 // Error Handler
 // ============================================================
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
@@ -363,6 +383,19 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 async function main(): Promise<void> {
   await prisma.$connect();
   console.log('[Server] Database connected.');
+
+  // ── Autonomous pipeline cron ──────────────────────────────────
+  const CRON_SCHEDULE = process.env.PIPELINE_CRON_SCHEDULE || '0 */4 * * *';
+  cron.schedule(CRON_SCHEDULE, async () => {
+    console.log('[CRON] Initiating autonomous newsroom run...');
+    try {
+      await runPipeline();
+    } catch (error) {
+      console.error('[CRON] Pipeline run failed:', error);
+    }
+  });
+  console.log(`[CRON] Pipeline scheduled: "${CRON_SCHEDULE}" (override with PIPELINE_CRON_SCHEDULE env var)`);
+  // ─────────────────────────────────────────────────────────────
 
   app.listen(PORT, () => {
     console.log(`[Server] Running on http://localhost:${PORT}`);
