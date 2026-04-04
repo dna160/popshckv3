@@ -8,7 +8,7 @@ cmds = [
 cmds = [
   "npm run build --prefix frontend",
   "cp -r frontend/dist backend/public",
-  "cd backend && npx prisma generate && npm run build"
+  "cd backend && npx prisma generate && npx prisma db push --accept-data-loss && npm run build"
 ]
 
 [start]
