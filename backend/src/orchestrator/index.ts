@@ -38,7 +38,7 @@ import {
 
 import { updateUI, updateArticleState } from './tools/update_ui';
 import { ORCHESTRATOR_IDENTITY }        from './prompt';
-import { PILLARS, PILLAR_LABELS }        from '../../../shared/types';
+import { PILLARS, PILLAR_LABELS }        from '../shared/types';
 import { TopicBank }                     from '../services/topic-bank';
 import type {
   Pillar,
@@ -46,7 +46,7 @@ import type {
   ResearchedItem,
   DraftArticle,
   PipelineLogEntry,
-} from '../../../shared/types';
+} from '../shared/types';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MAX_REVISION_LOOPS  = 3;

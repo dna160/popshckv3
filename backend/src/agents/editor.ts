@@ -11,8 +11,8 @@
 
 import { chat, parseJsonResponse } from '../services/llm';
 import { marked } from 'marked';
-import type { DraftArticle, EditorResult } from '../../../shared/types';
-import { PILLAR_LABELS } from '../../../shared/types';
+import type { DraftArticle, EditorResult } from '../shared/types';
+import { PILLAR_LABELS } from '../shared/types';
 
 /**
  * HTTP HEAD pre-check for image URLs.

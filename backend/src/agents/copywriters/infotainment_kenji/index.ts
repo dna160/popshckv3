@@ -11,7 +11,7 @@
  */
 
 import { chat } from '../../../services/llm';
-import type { ResearchedItem, DraftArticle, ArticleImage } from '../../../../../shared/types';
+import type { ResearchedItem, DraftArticle, ArticleImage } from '../../../shared/types';
 
 export const PERSONA_NAME = 'Kenji';
 export const WP_AUTHOR_ID = 9; // WP user: LISAKAGAWA

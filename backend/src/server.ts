@@ -12,7 +12,7 @@ import { marked } from 'marked';
 import dotenv from 'dotenv';
 import { runPipeline, isPipelineRunning, abortPipeline } from './continuous-pipeline';
 import { publishArticle } from './services/wordpress';
-import type { ArticleImage, ApiResponse, Pillar } from '../../shared/types';
+import type { ArticleImage, ApiResponse, Pillar } from './shared/types';
 
 dotenv.config();
 

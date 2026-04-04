@@ -10,7 +10,7 @@
  */
 
 import { chat } from '../../../services/llm';
-import type { ResearchedItem, DraftArticle, ArticleImage } from '../../../../../shared/types';
+import type { ResearchedItem, DraftArticle, ArticleImage } from '../../../shared/types';
 
 export const PERSONA_NAME = 'Hikari';
 export const WP_AUTHOR_ID = 7; // WP user: MRYAKUZA

@@ -47,8 +47,8 @@ import fs   from 'fs/promises';
 import { PrismaClient } from '@prisma/client';
 import { fetchFeed, RSS_FEEDS, PRIORITY_FEEDS } from '../services/rss';
 import { chat, parseJsonResponse } from '../services/llm';
-import type { Pillar, ScoutItem } from '../../../shared/types';
-import { PILLARS, PILLAR_LABELS } from '../../../shared/types';
+import type { Pillar, ScoutItem } from '../shared/types';
+import { PILLARS, PILLAR_LABELS } from '../shared/types';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const MAX_CANDIDATES_PER_PILLAR = 10;  // used by FeedMemory.score() to compute need()

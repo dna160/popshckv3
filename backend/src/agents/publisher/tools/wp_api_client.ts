@@ -13,7 +13,7 @@
  *   Taro    → 8  (Toys/Collectibles) WP user: FINALHERO Pantheon
  */
 
-import type { ArticleImage, Pillar } from '../../../../../shared/types';
+import type { ArticleImage, Pillar } from '../../../shared/types';
 
 // ── Author ID mapping ─────────────────────────────────────────────────────────
 export const AUTHOR_IDS: Record<string, number> = {

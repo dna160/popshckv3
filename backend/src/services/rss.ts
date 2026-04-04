@@ -1,5 +1,5 @@
 import Parser from 'rss-parser';
-import type { Pillar } from '../../../shared/types';
+import type { Pillar } from '../shared/types';
 
 const parser = new Parser({
   timeout: 10000,

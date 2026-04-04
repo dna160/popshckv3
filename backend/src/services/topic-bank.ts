@@ -20,8 +20,8 @@
 
 import path from 'path';
 import fs   from 'fs/promises';
-import type { Pillar, ScoutItem } from '../../../shared/types';
-import { PILLARS } from '../../../shared/types';
+import type { Pillar, ScoutItem } from '../shared/types';
+import { PILLARS } from '../shared/types';
 
 const BANK_FILE   = path.join(process.cwd(), 'data', 'topic-bank.json');
 const MAX_AGE_DAYS = 14;

@@ -11,7 +11,7 @@
  */
 
 import { PrismaClient } from '@prisma/client';
-import type { PipelineLogEntry } from '../../../../shared/types';
+import type { PipelineLogEntry } from '../../shared/types';
 
 /**
  * Persist the current log snapshot to the active pipeline run.

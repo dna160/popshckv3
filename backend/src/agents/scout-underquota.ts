@@ -23,7 +23,7 @@
 import { PrismaClient }            from '@prisma/client';
 import { fetchFeed, PRIORITY_FEEDS } from '../services/rss';
 import { chat, parseJsonResponse }  from '../services/llm';
-import type { Pillar, ScoutItem }   from '../../../shared/types';
+import type { Pillar, ScoutItem }   from '../shared/types';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const UNDERQUOTA_POOL_SIZE = 50;
