@@ -8,6 +8,8 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import cron from 'node-cron';
+import path from 'path';
+import fs from 'fs';
 import { PrismaClient } from '@prisma/client';
 import { marked } from 'marked';
 import dotenv from 'dotenv';
@@ -352,6 +354,18 @@ app.get('/api/dashboard/stats', async (_req: Request, res: Response) => {
 
 // ============================================================
 // Error Handler
+// ============================================================
+// Serve frontend static files (built into ../public relative to dist/)
+// ============================================================
+const publicDir = path.join(__dirname, '..', 'public');
+if (fs.existsSync(publicDir)) {
+  app.use(express.static(publicDir));
+  app.get('*', (_req: Request, res: Response) => {
+    res.sendFile(path.join(publicDir, 'index.html'));
+  });
+  console.log('[Server] Serving frontend from', publicDir);
+}
+
 // ============================================================
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error('[Server] Unhandled error:', err);

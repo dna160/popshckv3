@@ -4,6 +4,7 @@ node_modules/
 .DS_Store
 dist/
 build/
+backend/public/
 .next/
 out/
 npm-debug.log*

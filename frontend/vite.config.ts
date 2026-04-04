@@ -14,12 +14,5 @@ export default defineConfig({
   },
   preview: {
     allowedHosts: true,
-    proxy: {
-      '/api': {
-        target: 'https://back-end-production-14be.up.railway.app',
-        changeOrigin: true,
-        secure: true,
-      },
-    },
   },
 });
