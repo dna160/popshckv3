@@ -6,14 +6,14 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "start": "http-server dist -p ${PORT:-3000} --cors -c-1 --proxy http://localhost:${PORT:-3000}?",
+    "start": "node server.js",
     "preview": "vite preview",
     "lint": "eslint src --ext ts,tsx"
   },
   "dependencies": {
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "http-server": "^14.1.1"
+    "express": "^4.18.3"
   },
   "devDependencies": {
     "@types/react": "^18.2.66",
