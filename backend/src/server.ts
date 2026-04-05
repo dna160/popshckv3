@@ -323,11 +323,36 @@ app.get('/api/pipeline/logs', async (_req: Request, res: Response) => {
  * GET /api/dashboard/stats
  * Aggregate stats for the dashboard
  */
-app.get('/api/dashboard/stats', async (_req: Request, res: Response) => {
+app.get('/api/dashboard/stats', async (req: Request, res: Response) => {
   try {
     const articles = await prisma.article.findMany({
       select: { status: true, pillar: true },
     });
+
+    // Parse optional ?hours=N param for published-by-pillar time window
+    const hoursParam = Number(req.query.hours);
+    const hours = Number.isFinite(hoursParam) && hoursParam > 0 ? hoursParam : null;
+
+    let publishedByPillar: Record<string, number> = {
+      anime: 0, gaming: 0, infotainment: 0, manga: 0, toys: 0,
+    };
+
+    if (hours !== null) {
+      const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000);
+      const recent = await prisma.article.findMany({
+        where: { status: 'PUBLISHED', createdAt: { gte: cutoff } },
+        select: { pillar: true },
+      });
+      for (const a of recent) {
+        if (a.pillar in publishedByPillar) publishedByPillar[a.pillar]++;
+      }
+    } else {
+      // No filter — return all published articles by pillar
+      const published = articles.filter((a) => a.status === 'PUBLISHED');
+      for (const a of published) {
+        if (a.pillar in publishedByPillar) publishedByPillar[a.pillar]++;
+      }
+    }
 
     const stats = {
       total: articles.length,
@@ -344,6 +369,7 @@ app.get('/api/dashboard/stats', async (_req: Request, res: Response) => {
         manga: articles.filter((a) => a.pillar === 'manga').length,
         toys: articles.filter((a) => a.pillar === 'toys').length,
       },
+      publishedByPillar,
     };
 
     res.json({ success: true, data: stats });

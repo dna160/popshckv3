@@ -89,6 +89,7 @@ export interface DashboardStats {
   published: number;
   failed: number;
   byPillar: Record<Pillar, number>;
+  publishedByPillar: Record<Pillar, number>;
 }
 
 export interface ApiResponse<T> {

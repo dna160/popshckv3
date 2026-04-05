@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { PipelineStatusData, DashboardStats } from '../types';
 import { PILLAR_LABELS, PILLARS } from '../types';
-import { triggerPipeline } from '../api';
+import { triggerPipeline, getDashboardStats } from '../api';
 
 interface NewsroomFloorProps {
   pipelineStatus: PipelineStatusData | null;
@@ -170,6 +170,24 @@ export const NewsroomFloor: React.FC<NewsroomFloorProps> = ({
   const [triggerError, setTriggerError] = useState<string | null>(null);
   const [showLogModal, setShowLogModal] = useState(false);
 
+  // Pillar time-window filter
+  const TIME_WINDOWS = [
+    { label: '8H',  hours: 8   },
+    { label: '24H', hours: 24  },
+    { label: '3D',  hours: 72  },
+    { label: '7D',  hours: 168 },
+  ] as const;
+  const [pillarHours, setPillarHours] = useState<number>(24);
+  const [pillarCounts, setPillarCounts] = useState<Record<string, number> | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getDashboardStats(pillarHours)
+      .then((s) => { if (!cancelled) setPillarCounts(s.publishedByPillar); })
+      .catch(() => { /* non-fatal */ });
+    return () => { cancelled = true; };
+  }, [pillarHours, stats]); // re-fetch when stats updates (after pipeline run)
+
   const isRunning = pipelineStatus?.isRunning ?? false;
   const currentRun = pipelineStatus?.currentRun;
   const lastRun = pipelineStatus?.lastRun;
@@ -301,15 +319,38 @@ export const NewsroomFloor: React.FC<NewsroomFloorProps> = ({
 
           {/* Per-pillar breakdown */}
           <div className="card p-3 space-y-2.5">
-            <p className="section-title">Articles by Pillar</p>
-            {PILLARS.map((pillar) => (
-              <PillarBar
-                key={pillar}
-                pillar={pillar}
-                count={stats.byPillar[pillar] ?? 0}
-                total={stats.total}
-              />
-            ))}
+            <div className="flex items-center justify-between">
+              <p className="section-title">Published by Pillar</p>
+              <div className="flex gap-1">
+                {TIME_WINDOWS.map(({ label, hours }) => (
+                  <button
+                    key={label}
+                    onClick={() => setPillarHours(hours)}
+                    className={`text-[10px] font-mono px-1.5 py-0.5 rounded border transition-colors ${
+                      pillarHours === hours
+                        ? 'border-newsroom-blue/60 bg-newsroom-blue/15 text-newsroom-blue'
+                        : 'border-newsroom-border bg-newsroom-surface text-newsroom-subtle hover:border-newsroom-blue/30 hover:text-newsroom-text'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {PILLARS.map((pillar) => {
+              const count = pillarCounts?.[pillar] ?? 0;
+              const total = pillarCounts
+                ? Object.values(pillarCounts).reduce((s, n) => s + n, 0)
+                : 0;
+              return (
+                <PillarBar
+                  key={pillar}
+                  pillar={pillar}
+                  count={count}
+                  total={total}
+                />
+              );
+            })}
           </div>
         </>
       )}

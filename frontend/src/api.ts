@@ -88,6 +88,7 @@ export async function getPipelineLogs(): Promise<{
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 
-export async function getDashboardStats(): Promise<DashboardStats> {
-  return request<DashboardStats>('/dashboard/stats');
+export async function getDashboardStats(hours?: number): Promise<DashboardStats> {
+  const qs = hours != null ? `?hours=${hours}` : '';
+  return request<DashboardStats>(`/dashboard/stats${qs}`);
 }
