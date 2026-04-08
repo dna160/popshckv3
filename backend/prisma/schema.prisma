@@ -10,20 +10,40 @@ datasource db {
 }
 
 model Article {
-  id            String   @id @default(cuid())
+  id            String       @id @default(cuid())
   title         String
   pillar        String
   sourceUrl     String
-  status        String   @default("PROCESSING") // GREEN, YELLOW, RED, PROCESSING, FAILED, PUBLISHED
-  revisionCount Int      @default(0)
+  status        String       @default("PROCESSING") // GREEN, YELLOW, RED, PROCESSING, FAILED, PUBLISHED
+  revisionCount Int          @default(0)
   content       String?
   contentHtml   String?
-  images        String?  // JSON array of {url, alt, isFeatured}
+  images        String?      // JSON array of {url, alt, isFeatured}
   editorNotes   String?
   wpPostId      Int?
   wpPostUrl     String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  socialPosts   SocialPost[]
+}
+
+model SocialPost {
+  id            String    @id @default(cuid())
+  articleId     String
+  article       Article   @relation(fields: [articleId], references: [id])
+  pillar        String
+  imageCopy     String    // 5-6 word punchy text rendered on image
+  caption       String    // Full caption with emojis and hashtags
+  postImageUrl  String?   // 1:1 WordPress media URL
+  storyImageUrl String?   // 9:16 WordPress media URL
+  status        String    @default("PENDING") // PENDING, POSTED, FAILED
+  postedAt      DateTime?
+  igPostId      String?
+  fbPostId      String?
+  xPostId       String?
+  tiktokPostId  String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 }
 
 model ProcessedUrl {

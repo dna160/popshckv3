@@ -6,22 +6,22 @@
  * - Post creation with author ID and category assignment
  *
  * Author–WP User ID mapping (matches persona names from specialized copywriters):
- *   Satoshi → 2  (Anime)
- *   Hikari  → 7  (Gaming)       WP user: MRYAKUZA
- *   Kenji   → 9  (Infotainment) WP user: LISAKAGAWA
- *   Rina    → 5  (Manga)
- *   Taro    → 8  (Toys/Collectibles) WP user: FINALHERO
+ *   Satoshi → 10 (Anime)        WP user: Harry Kaguya
+ *   Hikari  → 7  (Gaming)       WP user: MRYAKUZA Pantheon
+ *   Kenji   → 9  (Infotainment) WP user: Lisa Kagawa
+ *   Rina    → 11 (Manga)        WP user: Steven Nelson
+ *   Taro    → 8  (Toys/Collectibles) WP user: FINALHERO Pantheon
  */
 
 import type { ArticleImage, Pillar } from '../../../../../shared/types';
 
 // ── Author ID mapping ─────────────────────────────────────────────────────────
 export const AUTHOR_IDS: Record<string, number> = {
-  Satoshi: 2,
-  Hikari:  7,  // WP user: MRYAKUZA
-  Kenji:   9,  // WP user: LISAKAGAWA
-  Rina:    5,
-  Taro:    8,  // WP user: FINALHERO
+  Satoshi: 10, // WP user: Harry Kaguya
+  Hikari:   7, // WP user: MRYAKUZA Pantheon
+  Kenji:    9, // WP user: Lisa Kagawa
+  Rina:    11, // WP user: Steven Nelson
+  Taro:     8, // WP user: FINALHERO Pantheon
 };
 
 // ── Category ID mapping ───────────────────────────────────────────────────────
@@ -125,6 +125,54 @@ export async function uploadImageFromUrl(
     }
   } catch (err) {
     console.warn(`[WpApiClient] alt_text patch failed for media ${media.id}:`, (err as Error).message);
+  }
+
+  return media;
+}
+
+/**
+ * Upload a locally rendered image Buffer to the WordPress media library.
+ * Used by the Social Media Orchestrator to persist rendered social images.
+ *
+ * @param imageBuffer  Raw image data (e.g. PNG rendered by sharp)
+ * @param filename     Desired filename (e.g. "social-post-abc123.png")
+ * @param altText      Alt text / title for the media item
+ * @param mimeType     MIME type (default: "image/png")
+ */
+export async function uploadImageBuffer(
+  imageBuffer: Buffer,
+  filename:    string,
+  altText:     string,
+  mimeType:    string = 'image/png'
+): Promise<WpMediaResponse> {
+  const { apiBase, auth } = getConfig();
+
+  const uploadResponse = await fetch(`${apiBase}/media`, {
+    method:  'POST',
+    headers: {
+      Authorization:         auth,
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Content-Type':        mimeType,
+    },
+    body: imageBuffer,
+  });
+
+  if (!uploadResponse.ok) {
+    const text = await uploadResponse.text();
+    throw new Error(`WordPress media upload failed: ${uploadResponse.status} - ${text}`);
+  }
+
+  const media = (await uploadResponse.json()) as WpMediaResponse;
+
+  // Set alt_text + title
+  try {
+    await fetch(`${apiBase}/media/${media.id}`, {
+      method:  'POST',
+      headers: { Authorization: auth, 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ alt_text: altText, title: altText }),
+    });
+  } catch {
+    // Non-fatal — media is uploaded, metadata update is best-effort
   }
 
   return media;

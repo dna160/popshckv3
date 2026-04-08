@@ -17,38 +17,96 @@ export interface RssItem {
   sourceFeed: string; // hostname of the feed URL this item came from
 }
 
+/** A feed entry with explicit pillar affinity tags. */
+export interface FeedConfig {
+  url:  string;
+  tags: Pillar[]; // pillars this feed predominantly covers
+}
+
 /**
- * Priority Japanese RSS feeds.
- * These are fetched for ALL pillars — the Scout's LLM triage assigns each
- * item to the correct pillar based on content relevance.
+ * ── Tier 2: Preferred — General Feeds (Round 1 / Broad Scrape) ───────────────
+ *
+ * Fetched on every Round 1 dispatch. Mixed-topic, high-volume Japanese
+ * pop-culture feeds. The Scout's LLM triage categorises each item into the
+ * correct pillar. These feeds organically cover all 5 pillars but are not
+ * specialised — they are the starting "broad net".
+ *
+ * ── Tier 1: Priority — Subpillar-Specific Feeds (Underquota Protocol) ─────────
+ *
+ * Entries with a single specific tag (e.g. tags: ['manga']) are subpillar
+ * branches. The Underquota Protocol filters this list by tag to build a
+ * targeted pool for exactly the deficit pillar(s).
+ *
+ * e.g. natalie.mu/comic → tagged ['manga'] → activated when manga is underquota
  */
-export const PRIORITY_FEEDS: string[] = [
-  'https://automaton-media.com/feed/',                // Automaton — gaming, anime, manga
-  'https://www.4gamer.net/rss/index.xml',             // 4Gamer — gaming
-  'https://hobby.dengeki.com/feed/',                  // Dengeki Hobby — toys/collectibles
-  'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) — anime, manga, infotainment
-  'https://news.denfaminicogamer.jp/feed',            // Denfami — gaming, manga, anime
-  'https://essential-japan.com/feed/',                // Essential Japan — infotainment, lifestyle, culture
-  'https://www.toy-people.com/rss.php',               // Toy People News — toys/collectibles
+export const PRIORITY_FEEDS: FeedConfig[] = [
+  // ── General / mixed-topic (Round 1 broad net) ──────────────────────────────
+  { url: 'https://automaton-media.com/feed/',             tags: ['gaming', 'anime', 'manga']               },
+  { url: 'https://www.4gamer.net/rss/index.xml',          tags: ['gaming']                                 },
+  { url: 'https://hobby.dengeki.com/feed/',               tags: ['toys', 'anime']                          },
+  { url: 'https://chaosphere.hostdon.jp/@natalie.rss',    tags: ['anime', 'manga', 'gaming', 'infotainment'] },
+  { url: 'https://news.denfaminicogamer.jp/feed',         tags: ['gaming', 'anime', 'manga']               },
+  { url: 'https://essential-japan.com/feed/',             tags: ['infotainment']                           },
+  { url: 'https://www.toy-people.com/rss.php',            tags: ['toys']                                   },
+
+  // ── Subpillar-specific branches (Underquota Protocol — Tier 1) ─────────────
+  // Manga
+  { url: 'https://natalie.mu/comic/feed',                 tags: ['manga']                                  },
+  // Anime
+  { url: 'https://natalie.mu/anime/feed',                 tags: ['anime']                                  },
+  // Gaming
+  { url: 'https://natalie.mu/game/feed',                  tags: ['gaming']                                 },
+  // Infotainment
+  { url: 'https://natalie.mu/music/feed',                 tags: ['infotainment']                           },
+  // Toys / Collectibles
+  { url: 'https://www.amiami.com/eng/rss/newitem.xml',    tags: ['toys']                                   },
+
+  // ── Tokyo Hive + Oricon (General/Infotainment) ──────────────────────────────
+  { url: 'https://feeds.feedburner.com/tokyohive',         tags: ['infotainment', 'anime']                  },
+  { url: 'https://www.oricon.co.jp/rss/news/',             tags: ['infotainment']                           },
+  { url: 'https://www.oricon.co.jp/rss/music/',            tags: ['infotainment']                           },
+  { url: 'https://www.oricon.co.jp/rss/movie/',            tags: ['infotainment', 'anime']                  },
+  { url: 'https://www.oricon.co.jp/rss/special/',          tags: ['infotainment']                           },
 ];
 
 /**
- * Pillar-specific fallback feeds used only when priority feeds yield
- * insufficient candidates for a given pillar.
+ * ── Tier 1: Priority — Subpillar Branch Feeds (Underquota Protocol) ──────────
+ *
+ * Activated ONLY when the Master Orchestrator detects a quota deficit after
+ * Round 1. The Scout switches from the broad net to a "sniper" approach,
+ * fetching exclusively from hyper-specific feeds that match the missing pillars.
+ *
+ * Rules:
+ *   - Only feeds for the missing_pillars are fetched; others are ignored.
+ *   - LLM triage strictly filters results to the target pillar(s) only.
+ *   - Pool size: 50 items (RETRY_POOL_SIZE) per dispatch.
+ *
+ * Tier 3 (fallback_protocol) re-uses these same feeds but sweeps ALL pillars,
+ * sorted by FeedMemory score, when both Round 1 and Underquota have failed.
+ *
+ * Feed sources match the README Content Pillars table (source of truth).
  */
 export const RSS_FEEDS: Record<Pillar, string[]> = {
   anime: [
-    'https://www.animenewsnetwork.com/all/rss.xml',
+    'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) [anime] [manga] [gaming] [infotainment]
   ],
   gaming: [
+    'https://automaton-media.com/feed/',                // Automaton               [gaming] [anime] [manga]
+    'https://www.4gamer.net/rss/index.xml',             // 4Gamer                  [gaming]
+    'https://news.denfaminicogamer.jp/feed',             // Denfami                 [gaming] [anime] [manga]
   ],
   infotainment: [
+    'https://essential-japan.com/feed/',                // Essential Japan         [infotainment]
+    'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) [infotainment] [anime] [manga]
   ],
   manga: [
-    'https://animecorner.me/category/manga/feed/',
+    'https://automaton-media.com/feed/',                // Automaton               [gaming] [anime] [manga]
+    'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) [anime] [manga]
+    'https://news.denfaminicogamer.jp/feed',             // Denfami                 [gaming] [anime] [manga]
   ],
   toys: [
-    'https://www.toyark.com/feed/',
+    'https://hobby.dengeki.com/feed/',                  // Dengeki Hobby           [toys] [anime]
+    'https://www.toy-people.com/rss.php',               // Toy People News         [toys]
   ],
 };
 
@@ -115,13 +173,14 @@ export async function fetchFeed(url: string, pillar: Pillar): Promise<RssItem[]>
 }
 
 /**
- * Fetch all feeds for a given pillar.
- * Only the priority Japanese feeds are used — no fallbacks.
- * The Scout's LLM triage filters items to the correct pillar.
+ * Fetch the Tier 1 (Priority / Subpillar) feeds for a given pillar.
+ * Uses RSS_FEEDS[pillar] — the hyper-specific subpillar branches, NOT the
+ * general PRIORITY_FEEDS (Tier 2). Called during Underquota Protocol.
  */
 export async function fetchPillarFeeds(pillar: Pillar): Promise<RssItem[]> {
-  const results = await Promise.allSettled(
-    PRIORITY_FEEDS.map((url) => fetchFeed(url, pillar))
+  const feedUrls = RSS_FEEDS[pillar] ?? [];
+  const results  = await Promise.allSettled(
+    feedUrls.map((url) => fetchFeed(url, pillar))
   );
 
   const allItems: RssItem[] = [];
