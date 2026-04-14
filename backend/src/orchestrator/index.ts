@@ -86,16 +86,10 @@ const DEDUP_SIMILARITY_THRESHOLD = 0.30;
 
 /**
  * How far back to look in the Article DB when checking for cross-run
- * topic duplicates.  Articles from the previous pipeline run that were
- * published within this window will block a new article about the same topic.
- */
-const DEDUP_WINDOW_HOURS = 8;
-=======
  * topic duplicates. Articles published within this window block a new
  * article about the same topic.
  */
 const DEDUP_WINDOW_HOURS = 24;
->>>>>>> origin/main
 
 // ── Topic-deduplication utilities ─────────────────────────────────────────────
 
@@ -151,7 +145,6 @@ export class Orchestrator {
    *  Used for same-run deduplication so late-queue candidates don't repeat
    *  a topic that a parallel pillar queue already published. */
   private publishedThisRun:   Array<{ title: string; pillar: string }> = [];
->>>>>>> origin/main
 
   constructor(prisma: PrismaClient, abortSignal?: AbortSignal, onRunId?: (id: string) => void) {
     this.prisma      = prisma;
