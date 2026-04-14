@@ -9,7 +9,7 @@
  * pipeline log stream and the Dashboard.
  */
 
-import type { Pillar } from '../../../../shared/types';
+import type { Pillar } from '../../shared/types';
 
 // ── Agent registry ────────────────────────────────────────────────────────────
 

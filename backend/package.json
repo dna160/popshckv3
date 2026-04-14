@@ -11,6 +11,7 @@
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
     "pipeline:run": "tsx src/continuous-pipeline.ts",
+    "pipeline:trigger": "tsx src/continuous-pipeline.ts",
     "social:test": "tsx src/agents/social_media/test-sandbox.ts",
     "social:test:fast": "tsx src/agents/social_media/test-sandbox.ts --skip-vision"
   },

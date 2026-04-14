@@ -9,8 +9,8 @@
  */
 
 import { chat } from '../services/llm';
-import type { ResearchedItem, DraftArticle, ArticleImage } from '../../../shared/types';
-import { PILLAR_LABELS } from '../../../shared/types';
+import type { ResearchedItem, DraftArticle, ArticleImage } from '../shared/types';
+import { PILLAR_LABELS } from '../shared/types';
 
 const MIN_WORDS = 300;
 const MAX_WORDS = 400;

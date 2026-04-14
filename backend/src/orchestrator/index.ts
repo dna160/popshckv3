@@ -39,7 +39,7 @@ import {
 
 import { updateUI, updateArticleState } from './tools/update_ui';
 import { ORCHESTRATOR_IDENTITY }        from './prompt';
-import { PILLARS, PILLAR_LABELS }        from '../../../shared/types';
+import { PILLARS, PILLAR_LABELS }        from '../shared/types';
 import { TopicBank }                     from '../services/topic-bank';
 import type {
   Pillar,
@@ -47,7 +47,7 @@ import type {
   ResearchedItem,
   DraftArticle,
   PipelineLogEntry,
-} from '../../../shared/types';
+} from '../shared/types';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MAX_REVISION_LOOPS  = 3;
@@ -90,6 +90,12 @@ const DEDUP_SIMILARITY_THRESHOLD = 0.30;
  * published within this window will block a new article about the same topic.
  */
 const DEDUP_WINDOW_HOURS = 8;
+=======
+ * topic duplicates. Articles published within this window block a new
+ * article about the same topic.
+ */
+const DEDUP_WINDOW_HOURS = 24;
+>>>>>>> origin/main
 
 // ── Topic-deduplication utilities ─────────────────────────────────────────────
 
@@ -141,6 +147,11 @@ export class Orchestrator {
   private logs:                     PipelineLogEntry[] = [];
   private abortSignal:              AbortSignal | null = null;
   private onRunId:                  ((id: string) => void) | null = null;
+  /** Titles of articles completed (GREEN/YELLOW/PUBLISHED) in the current run.
+   *  Used for same-run deduplication so late-queue candidates don't repeat
+   *  a topic that a parallel pillar queue already published. */
+  private publishedThisRun:   Array<{ title: string; pillar: string }> = [];
+>>>>>>> origin/main
 
   constructor(prisma: PrismaClient, abortSignal?: AbortSignal, onRunId?: (id: string) => void) {
     this.prisma      = prisma;
@@ -365,7 +376,7 @@ export class Orchestrator {
    */
   private async orchestrateScoutingPhase(
     rejectedUrls: Set<string> = new Set()
-  ): Promise<{ buckets: Record<Pillar, ScoutItem[]>; bank: TopicBank }> {
+  ): Promise<{ buckets: Record<Pillar, ScoutItem[]>; bank: TopicBank; recentArticles: Array<{ title: string; pillar: string }> }> {
     const TARGET = TARGET_CANDIDATES_PER_PILLAR;
 
     // ── Load Brain ────────────────────────────────────────────────────────────
@@ -434,14 +445,20 @@ export class Orchestrator {
     // ── Pre-fetch recent articles for cross-run topic dedup ──────────────────
     // Queries articles created within the last DEDUP_WINDOW_HOURS so the Brain
     // can prevent re-covering a topic from the previous pipeline run.
-    const dedupCutoff     = new Date(Date.now() - DEDUP_WINDOW_HOURS * 3_600_000);
-    const recentArticles  = await this.prisma.article.findMany({
-      where:  { createdAt: { gte: dedupCutoff }, status: { notIn: ['RED', 'FAILED'] } },
+    const dedupCutoff    = new Date(Date.now() - DEDUP_WINDOW_HOURS * 3_600_000);
+    const recentArticles = await this.prisma.article.findMany({
+      where: {
+        createdAt: { gte: dedupCutoff },
+        // Explicitly include all non-failure statuses so published articles
+        // block re-coverage of the same topic within the 24-hour window.
+        status: { in: ['PROCESSING', 'GREEN', 'YELLOW', 'PUBLISHED'] },
+      },
       select: { title: true, pillar: true },
     });
     if (recentArticles.length > 0) {
       this.addLog(
-        `[Brain] ${recentArticles.length} article(s) from the last ${DEDUP_WINDOW_HOURS}h loaded for topic deduplication.`,
+        `[Brain] ${recentArticles.length} article(s) from the last ${DEDUP_WINDOW_HOURS}h ` +
+        `(incl. published) loaded for topic deduplication.`,
         'info',
         ORCHESTRATOR_IDENTITY
       );
@@ -546,7 +563,7 @@ export class Orchestrator {
       );
     }
 
-    return { buckets, bank };
+    return { buckets, bank, recentArticles };
   }
 
   // ── Article revision loop ─────────────────────────────────────────────────────
@@ -680,6 +697,11 @@ export class Orchestrator {
           revisionCount, editorNotes: editorResult.feedback,
         });
 
+        // Register this title in the same-run memory so parallel/later
+        // queues don't re-cover the same topic within this pipeline run.
+        const completedTitle = indonesianTitle || item.title;
+        this.publishedThisRun.push({ title: completedTitle, pillar: item.pillar });
+
         // GREEN → dispatch Publisher
         if (status === 'GREEN') {
           const publishTitle = indonesianTitle || item.title;
@@ -803,10 +825,11 @@ export class Orchestrator {
   // ── Per-pillar queue ──────────────────────────────────────────────────────────
 
   private async runPillarQueue(
-    pillar:     Pillar,
-    candidates: ScoutItem[],
-    target:     number,
-    bank:       TopicBank
+    pillar:       Pillar,
+    candidates:   ScoutItem[],
+    target:       number,
+    bank:         TopicBank,
+    recentTitles: Array<{ title: string; pillar: string }>
   ): Promise<number> {
     const persona    = this.copywriters[pillar].personaName;
     let successCount = 0;
@@ -835,6 +858,27 @@ export class Orchestrator {
       }
 
       processedIdx++;
+
+      // ── Runtime dedup: check against 24h DB window + same-run published ──────
+      // Catches duplicates that slipped through the scouting-phase dedup:
+      // brain-backup items, topics banked from previous runs, or topics whose
+      // counterpart was published by a parallel pillar queue in this same run.
+      const topicTokens = titleTokens(topic.title);
+      const allRecent   = [...recentTitles, ...this.publishedThisRun];
+      const dupMatch    = allRecent.find((recent) =>
+        jaccardSimilarity(topicTokens, titleTokens(recent.title)) >= DEDUP_SIMILARITY_THRESHOLD
+      );
+      if (dupMatch) {
+        this.addLog(
+          `[Brain] Runtime dedup [${pillar}]: "${topic.title}" ` +
+          `matches recent → "${dupMatch.title}" — discarded`,
+          'warn',
+          ORCHESTRATOR_IDENTITY
+        );
+        await this.scout.markProcessed(topic.link);
+        continue;
+      }
+      // ─────────────────────────────────────────────────────────────────────────
 
       this.addLog(
         `[${pillar}/${persona}${isBrainItem ? ' ·Brain' : ''}] Processing candidate (${successCount}/${target}): "${topic.title}"`,
@@ -920,8 +964,9 @@ export class Orchestrator {
    *   Each queue: Researcher → Copywriter (persona) → Editor → Publisher (GREEN).
    */
   async run(): Promise<{ runId: string; articlesProcessed: number }> {
-    this.logs = [];
+    this.logs                    = [];
     this.socialPostCountByPillar = new Map(); // reset per-run social post quota
+    this.publishedThisRun        = [];
 
     const pipelineRun = await this.prisma.pipelineRun.create({
       data: { status: 'RUNNING' },
@@ -949,7 +994,7 @@ export class Orchestrator {
       //
       // The TopicBank (Brain) pre-fills buckets with previously-triaged topics
       // before any Scout round, so the Scout only fills remaining slots.
-      const { buckets: candidatesByPillar, bank } = await this.orchestrateScoutingPhase();
+      const { buckets: candidatesByPillar, bank, recentArticles } = await this.orchestrateScoutingPhase();
 
       for (const pillar of PILLARS) {
         const persona = this.copywriters[pillar].personaName;
@@ -964,7 +1009,7 @@ export class Orchestrator {
       this.addLog('Dispatching all 5 pillar queues in parallel...', 'info', ORCHESTRATOR_IDENTITY);
       const pillarResults = await Promise.all(
         PILLARS.map((pillar) =>
-          this.runPillarQueue(pillar, candidatesByPillar[pillar], ARTICLES_PER_PILLAR, bank)
+          this.runPillarQueue(pillar, candidatesByPillar[pillar], ARTICLES_PER_PILLAR, bank, recentArticles)
         )
       );
 

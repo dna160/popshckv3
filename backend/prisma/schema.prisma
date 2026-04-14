@@ -5,7 +5,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -14,12 +14,12 @@ model Article {
   title         String
   pillar        String
   sourceUrl     String
-  status        String       @default("PROCESSING") // GREEN, YELLOW, RED, PROCESSING, FAILED, PUBLISHED
-  revisionCount Int          @default(0)
-  content       String?
-  contentHtml   String?
-  images        String?      // JSON array of {url, alt, isFeatured}
-  editorNotes   String?
+  status        String   @default("PROCESSING") // GREEN, YELLOW, RED, PROCESSING, FAILED, PUBLISHED
+  revisionCount Int      @default(0)
+  content       String?  @db.Text
+  contentHtml   String?  @db.Text
+  images        String?  @db.Text  // JSON array of {url, alt, isFeatured}
+  editorNotes   String?  @db.Text
   wpPostId      Int?
   wpPostUrl     String?
   createdAt     DateTime     @default(now())
@@ -48,15 +48,15 @@ model SocialPost {
 
 model ProcessedUrl {
   id        String   @id @default(cuid())
-  url       String   @unique
+  url       String   @unique @db.Text
   createdAt DateTime @default(now())
 }
 
 model PipelineRun {
   id                String    @id @default(cuid())
-  status            String    // RUNNING, COMPLETED, FAILED
+  status            String    // RUNNING, COMPLETED, FAILED, ABORTED
   articlesProcessed Int       @default(0)
   startedAt         DateTime  @default(now())
   completedAt       DateTime?
-  logs              String?   // JSON array of PipelineLogEntry
+  logs              String?   @db.Text  // JSON array of PipelineLogEntry
 }

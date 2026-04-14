@@ -16,7 +16,7 @@
  * WordPress downtime — the Publisher handles all recovery autonomously.
  */
 
-import type { ArticleImage, Pillar } from '../../../../shared/types';
+import type { ArticleImage, Pillar } from '../../shared/types';
 import { publishToWordPress } from './tools/wp_api_client';
 
 const MAX_RETRIES    = 3;

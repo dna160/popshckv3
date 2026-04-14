@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-import type { ArticleImage, Pillar } from '../../../shared/types';
+import type { ArticleImage, Pillar } from '../shared/types';
 
 dotenv.config();
 

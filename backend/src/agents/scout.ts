@@ -45,10 +45,10 @@
 import path from 'path';
 import fs   from 'fs/promises';
 import { PrismaClient } from '@prisma/client';
-import { fetchFeed, RSS_FEEDS, PRIORITY_FEEDS } from '../services/rss';
+import { fetchFeed, RSS_FEEDS, PRIORITY_FEEDS, FEED_FALLBACK_MAP } from '../services/rss';
 import { chat, parseJsonResponse } from '../services/llm';
-import type { Pillar, ScoutItem } from '../../../shared/types';
-import { PILLARS, PILLAR_LABELS } from '../../../shared/types';
+import type { Pillar, ScoutItem } from '../shared/types';
+import { PILLARS, PILLAR_LABELS } from '../shared/types';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const MAX_CANDIDATES_PER_PILLAR = 10;  // used by FeedMemory.score() to compute need()
@@ -554,9 +554,9 @@ Respond ONLY with the JSON object.`;
     triagedUrls:  Set<string>,
     maxItems:     number = FRESH_POOL_SIZE
   ): Promise<PoolItem[]> {
-    // ── Step 1: Fetch all feeds concurrently ──────────────────────────────────
+    // ── Step 1: Fetch all feeds concurrently (with per-feed fallback) ─────────
     const feedResults = await Promise.allSettled(
-      feedUrls.map((url) => fetchFeed(url, 'anime'))
+      feedUrls.map((url) => fetchFeed(url, 'anime', FEED_FALLBACK_MAP.get(url)))
     );
 
     // ── Step 2: Collect and deduplicate raw items ─────────────────────────────
