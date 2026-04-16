@@ -7,12 +7,15 @@
 
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
+import cron from 'node-cron';
+import path from 'path';
+import fs from 'fs';
 import { PrismaClient } from '@prisma/client';
 import { marked } from 'marked';
 import dotenv from 'dotenv';
 import { runPipeline, isPipelineRunning, abortPipeline } from './continuous-pipeline';
 import { publishArticle } from './services/wordpress';
-import type { ArticleImage, ApiResponse, Pillar } from '../../shared/types';
+import type { ArticleImage, ApiResponse, Pillar } from './shared/types';
 
 dotenv.config();
 
@@ -21,7 +24,7 @@ const prisma = new PrismaClient();
 const PORT = Number(process.env.PORT) || 3001;
 
 // Middleware
-app.use(cors());
+app.use(cors({ origin: '*', methods: ['GET','POST','PATCH','DELETE','OPTIONS'] }));
 app.use(express.json());
 
 // ============================================================
@@ -350,6 +353,23 @@ app.get('/api/dashboard/stats', async (_req: Request, res: Response) => {
 });
 
 // ============================================================
+// Serve frontend static files (built into ../public relative to dist/)
+// Falls back to a JSON health-check when public dir isn't present.
+// ============================================================
+const publicDir = path.join(__dirname, '..', 'public');
+if (fs.existsSync(publicDir)) {
+  app.use(express.static(publicDir));
+  app.get('*', (_req: Request, res: Response) => {
+    res.sendFile(path.join(publicDir, 'index.html'));
+  });
+  console.log('[Server] Serving frontend from', publicDir);
+} else {
+  app.get('/', (_req: Request, res: Response) => {
+    res.json({ status: 'ok', service: 'synthetic-newsroom-backend', api: '/api' });
+  });
+}
+
+// ============================================================
 // Error Handler
 // ============================================================
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
@@ -364,8 +384,96 @@ async function main(): Promise<void> {
   await prisma.$connect();
   console.log('[Server] Database connected.');
 
+  // ── Ensure all tables exist (idempotent raw SQL) ──────────────
+  console.log('[DB] Ensuring tables exist...');
+  const migrations: Array<{ name: string; sql: string }> = [
+    {
+      name: 'Article',
+      sql: `
+        CREATE TABLE IF NOT EXISTS "Article" (
+          "id"            TEXT         NOT NULL,
+          "title"         TEXT         NOT NULL,
+          "pillar"        TEXT         NOT NULL,
+          "sourceUrl"     TEXT         NOT NULL,
+          "status"        TEXT         NOT NULL DEFAULT 'PROCESSING',
+          "revisionCount" INTEGER      NOT NULL DEFAULT 0,
+          "content"       TEXT,
+          "contentHtml"   TEXT,
+          "images"        TEXT,
+          "editorNotes"   TEXT,
+          "wpPostId"      INTEGER,
+          "wpPostUrl"     TEXT,
+          "createdAt"     TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "updatedAt"     TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT "Article_pkey" PRIMARY KEY ("id")
+        )`,
+    },
+    {
+      name: 'ProcessedUrl',
+      sql: `
+        CREATE TABLE IF NOT EXISTS "ProcessedUrl" (
+          "id"        TEXT         NOT NULL,
+          "url"       TEXT         NOT NULL,
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT "ProcessedUrl_pkey" PRIMARY KEY ("id")
+        )`,
+    },
+    {
+      name: 'ProcessedUrl_url_key (unique index)',
+      sql: `CREATE UNIQUE INDEX IF NOT EXISTS "ProcessedUrl_url_key" ON "ProcessedUrl"("url")`,
+    },
+    {
+      name: 'PipelineRun',
+      sql: `
+        CREATE TABLE IF NOT EXISTS "PipelineRun" (
+          "id"                TEXT         NOT NULL,
+          "status"            TEXT         NOT NULL,
+          "articlesProcessed" INTEGER      NOT NULL DEFAULT 0,
+          "startedAt"         TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "completedAt"       TIMESTAMP(3),
+          "logs"              TEXT,
+          CONSTRAINT "PipelineRun_pkey" PRIMARY KEY ("id")
+        )`,
+    },
+  ];
+
+  for (const { name, sql } of migrations) {
+    try {
+      await prisma.$executeRawUnsafe(sql);
+      console.log(`[DB] ✓ ${name}`);
+    } catch (err) {
+      console.error(`[DB] ✗ ${name}:`, (err as Error).message);
+      throw err; // abort startup — server must not run without tables
+    }
+  }
+  console.log('[DB] All tables ready.');
+  // ─────────────────────────────────────────────────────────────
+
+  // ── Autonomous pipeline cron ──────────────────────────────────
+  const CRON_SCHEDULE = process.env.PIPELINE_CRON_SCHEDULE || '0 */8 * * *';
+  cron.schedule(CRON_SCHEDULE, async () => {
+    console.log('[CRON] Initiating autonomous newsroom run...');
+    try {
+      await runPipeline();
+    } catch (error) {
+      console.error('[CRON] Pipeline run failed:', error);
+    }
+  });
+  console.log(`[CRON] Pipeline scheduled: "${CRON_SCHEDULE}" (override with PIPELINE_CRON_SCHEDULE env var)`);
+  // ─────────────────────────────────────────────────────────────
+
   app.listen(PORT, () => {
     console.log(`[Server] Running on http://localhost:${PORT}`);
+
+    // ── Run pipeline once immediately on startup ──────────────────
+    const RUN_ON_STARTUP = process.env.PIPELINE_RUN_ON_STARTUP !== 'false';
+    if (RUN_ON_STARTUP) {
+      console.log('[Startup] Triggering initial pipeline run...');
+      runPipeline().catch((err) => {
+        console.error('[Startup] Initial pipeline run failed:', err);
+      });
+    }
+    // ─────────────────────────────────────────────────────────────
   });
 }
 

@@ -1,0 +1,65 @@
+{
+  "www.4gamer.net": {
+    "anime": 6,
+    "gaming": 209,
+    "infotainment": 0,
+    "manga": 0,
+    "toys": 12
+  },
+  "news.denfaminicogamer.jp": {
+    "anime": 28,
+    "gaming": 136,
+    "infotainment": 10,
+    "manga": 14,
+    "toys": 24
+  },
+  "hobby.dengeki.com": {
+    "anime": 1,
+    "gaming": 2,
+    "infotainment": 1,
+    "manga": 4,
+    "toys": 36
+  },
+  "automaton-media.com": {
+    "anime": 0,
+    "gaming": 115,
+    "infotainment": 0,
+    "manga": 0,
+    "toys": 0
+  },
+  "chaosphere.hostdon.jp": {
+    "anime": 21,
+    "gaming": 0,
+    "infotainment": 3,
+    "manga": 46,
+    "toys": 1
+  },
+  "essential-japan.com": {
+    "anime": 12,
+    "gaming": 19,
+    "infotainment": 0,
+    "manga": 3,
+    "toys": 0
+  },
+  "www.animenewsnetwork.com": {
+    "anime": 518,
+    "gaming": 88,
+    "infotainment": 4,
+    "manga": 121,
+    "toys": 16
+  },
+  "animecorner.me": {
+    "anime": 86,
+    "gaming": 10,
+    "infotainment": 1,
+    "manga": 9,
+    "toys": 0
+  },
+  "www.toyark.com": {
+    "anime": 0,
+    "gaming": 0,
+    "infotainment": 0,
+    "manga": 0,
+    "toys": 6
+  }
+}

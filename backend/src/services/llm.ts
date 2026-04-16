@@ -69,6 +69,16 @@ const rateLimiter = new RateLimiter(900);
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+const CHAT_TIMEOUT_MS = 90_000; // 90 seconds — kills hanging API calls
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`LLM request timed out after ${ms}ms (${label})`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Send a chat completion request to Grok via xAI API.
  */
@@ -77,12 +87,16 @@ export async function chat(
   opts: { temperature?: number; maxTokens?: number } = {}
 ): Promise<string> {
   await rateLimiter.acquire();
-  const response = await llmClient.chat.completions.create({
-    model: MODEL,
-    messages: messages as OpenAI.ChatCompletionMessageParam[],
-    temperature: opts.temperature ?? 0.7,
-    max_tokens: opts.maxTokens ?? 2048,
-  });
+  const response = await withTimeout(
+    llmClient.chat.completions.create({
+      model: MODEL,
+      messages: messages as OpenAI.ChatCompletionMessageParam[],
+      temperature: opts.temperature ?? 0.7,
+      max_tokens: opts.maxTokens ?? 2048,
+    }),
+    CHAT_TIMEOUT_MS,
+    'chat'
+  );
 
   const content = response.choices[0]?.message?.content;
   if (!content) {
@@ -102,7 +116,7 @@ export async function evaluateImageRelevance(
 ): Promise<boolean> {
   try {
     await rateLimiter.acquire();
-    const response = await llmClient.chat.completions.create({
+    const response = await withTimeout(llmClient.chat.completions.create({
       model: MODEL,
       messages: [
         {
@@ -125,7 +139,7 @@ Image URL: ${imageUrl}`,
       ],
       max_tokens: 10,
       temperature: 0,
-    });
+    }), CHAT_TIMEOUT_MS, 'vision');
 
     const answer = response.choices[0]?.message?.content?.trim().toUpperCase();
     return answer === 'YES';

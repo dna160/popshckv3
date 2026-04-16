@@ -10,9 +10,10 @@
  */
 
 import { chat, parseJsonResponse } from '../services/llm';
+import type { ChatMessage } from '../services/llm';
 import { marked } from 'marked';
-import type { DraftArticle, EditorResult } from '../../../shared/types';
-import { PILLAR_LABELS } from '../../../shared/types';
+import type { DraftArticle, EditorResult } from '../shared/types';
+import { PILLAR_LABELS } from '../shared/types';
 
 /**
  * HTTP HEAD pre-check for image URLs.
@@ -98,11 +99,22 @@ This includes HoYoverse, miHoYo, NEXON, Netmarble, Krafton, NetEase, and any gac
 Do NOT fail an article purely because the developer is Chinese or Korean.
 
 **REVIEW CRITERIA:**
-1. **Headline Check (FATAL):** The headline MUST be written entirely in Latin script — Indonesian sentence structure AND all proper nouns (game titles, anime titles, character names, studio names). The Scout Agent provides Translation Notes specifically so the Copywriter can write proper romanised names (e.g. "Demon Slayer" or "Kimetsu no Yaiba") instead of raw Kanji/Kana. If ANY Japanese Kanji or Kana characters appear anywhere in the headline, FAIL the review — it means the Copywriter ignored the Translation Notes.
-2. **Writing & Tone:** Ensure the text is fluent Indonesian, hallucination-free, and fits the required brand safety standards (No inflammatory content, passes UU ITE).
-3. **Image Validity (CRITICAL):** Evaluate the embedded image URLs. If your analysis determines an image is broken, fails to load, or is a generic placeholder/error image, you MUST FAIL the review.
-4. **Word Count:** Must be between 200 and 400 words.
-5. **Structure:** Clear intro, body sections with headers, forward-looking conclusion.
+1. **Judul Check:** The article MUST begin with a \`**Judul:**\` line before the H1. Check two things:
+   a. The line exists — if missing, FAIL with "judul line missing".
+   b. The title is 10 words or fewer — count the words after \`**Judul:**\`. If over 10, FAIL with "article title over 10 words". A title that ends mid-phrase (cut off) also fails — it must be a complete, meaningful phrase.
+2. **Headline Check (FATAL):** The headline MUST be written entirely in Latin script — Indonesian sentence structure AND all proper nouns (game titles, anime titles, character names, studio names). The Scout Agent provides Translation Notes specifically so the Copywriter can write proper romanised names (e.g. "Demon Slayer" or "Kimetsu no Yaiba") instead of raw Kanji/Kana. If ANY Japanese Kanji or Kana characters appear anywhere in the headline, FAIL the review — it means the Copywriter ignored the Translation Notes.
+3. **Writing & Tone:** Ensure the text is fluent Indonesian, hallucination-free, and fits the required brand safety standards (No inflammatory content, passes UU ITE).
+4. **Image Relevance & Validity (CRITICAL — Vision Required):** You have been given the actual images above for visual inspection. Evaluate EACH image on ALL three points:
+   a. **Relevance to article subject:** The image must match the SPECIFIC item the article is about — not just the franchise or character. Examples of FAILURES:
+      - Article is about Nendoroid (chibi/SD scale) collectibles → image shows a full-size PVC statue or scale figure (WRONG product type → FAIL)
+      - Article is about anime series "X" released in 2024 → image appears to be from a different "X" series or an older adaptation — USE release dates, art style, and character design as disambiguation clues (different series → FAIL)
+      - Article is about a specific game character → image shows a different character from the same game (FAIL)
+      - Article is about a specific episode/arc → image is from an unrelated part of the series (FAIL)
+   b. **Image validity:** Is the image broken, a placeholder, an error page, or a watermarked "image not available" graphic? → FAIL
+   c. **Alt text accuracy:** Does what you actually see in the image match its alt text description? Significant mismatches → FAIL
+   If ANY image fails on relevance OR validity OR alt text, route back with error_category "INCOMPLETE_INFO".
+5. **Word Count:** Must be between 200 and 400 words.
+6. **Structure:** Clear intro, body sections with headers, forward-looking conclusion.
 
 **OUTPUT FORMAT AND ROUTING RULES:**
 
@@ -138,9 +150,21 @@ You must declare the topic unsalvageable. Do NOT send it back to the Copywriter.
 }`;
 
     try {
+      // Build a multimodal message so the model can actually see the images
+      // and assess their relevance to the article subject (not just the URL string).
+      const userContent: ChatMessage['content'] = imageUrls.length > 0
+        ? [
+            { type: 'text' as const, text: prompt },
+            ...imageUrls.slice(0, 3).map((url) => ({
+              type: 'image_url' as const,
+              image_url: { url },
+            })),
+          ]
+        : prompt;
+
       const raw = await chat(
-        [{ role: 'user', content: prompt }],
-        { temperature: 0.2, maxTokens: 600 }
+        [{ role: 'user', content: userContent }],
+        { temperature: 0.2, maxTokens: 700 }
       );
 
       const result = parseJsonResponse<{

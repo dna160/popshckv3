@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-import type { ArticleImage, Pillar } from '../../../shared/types';
+import type { ArticleImage, Pillar } from '../shared/types';
 
 dotenv.config();
 
@@ -14,6 +14,7 @@ export interface WpPostPayload {
   categories?: number[];
   tags?: number[];
   featured_media?: number;
+  author?: number;
   meta?: Record<string, unknown>;
 }
 
@@ -35,6 +36,24 @@ const wpCategoryMap: Record<Pillar, number> = {
   infotainment: 10, // Infotainment
   manga: 14,        // Comic (no dedicated Manga category)
   toys: 12,         // Toys
+};
+
+/**
+ * Pillar → WordPress Author ID mapping.
+ * Must stay in sync with AUTHOR_IDS in publisher/tools/wp_api_client.ts.
+ *
+ *   anime        → 10  (Satoshi   — WP user: Harry Kaguya)
+ *   gaming       → 7   (Hikari    — WP user: MRYAKUZA Pantheon)
+ *   infotainment → 9   (Kenji     — WP user: Lisa Kagawa)
+ *   manga        → 11  (Rina      — WP user: Steven Nelson)
+ *   toys         → 8   (Taro      — WP user: FINALHERO Pantheon)
+ */
+const wpAuthorMap: Record<Pillar, number> = {
+  anime:         10, // Harry Kaguya
+  gaming:        7,  // MRYAKUZA Pantheon
+  infotainment:  9,  // Lisa Kagawa
+  manga:         11, // Steven Nelson
+  toys:          8,  // FINALHERO Pantheon
 };
 
 function getAuthHeader(): string {
@@ -189,6 +208,7 @@ export async function publishArticle(
   }
 
   const categoryId = pillar ? wpCategoryMap[pillar] : undefined;
+  const authorId   = pillar ? wpAuthorMap[pillar]   : undefined;
 
   const post = await createPost({
     title,
@@ -196,6 +216,7 @@ export async function publishArticle(
     status: 'publish',
     featured_media: featuredMediaId,
     ...(categoryId !== undefined ? { categories: [categoryId] } : {}),
+    ...(authorId   !== undefined ? { author: authorId }         : {}),
   });
 
   return {

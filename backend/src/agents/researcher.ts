@@ -12,8 +12,8 @@
 import { chat, evaluateImageRelevance, parseJsonResponse } from '../services/llm';
 import { searchImages, buildImageQuery } from '../services/serper';
 import { crawlUrl } from '../services/crawler';
-import type { Pillar, ScoutItem, ResearchedItem, ArticleImage } from '../../../shared/types';
-import { PILLAR_LABELS } from '../../../shared/types';
+import type { Pillar, ScoutItem, ResearchedItem, ArticleImage } from '../shared/types';
+import { PILLAR_LABELS } from '../shared/types';
 
 const REQUIRED_IMAGES = 3;
 const MAX_IMAGE_SEARCH_ROUNDS = 5;

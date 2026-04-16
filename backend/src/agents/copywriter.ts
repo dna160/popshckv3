@@ -9,8 +9,8 @@
  */
 
 import { chat } from '../services/llm';
-import type { ResearchedItem, DraftArticle, ArticleImage } from '../../../shared/types';
-import { PILLAR_LABELS } from '../../../shared/types';
+import type { ResearchedItem, DraftArticle, ArticleImage } from '../shared/types';
+import { PILLAR_LABELS } from '../shared/types';
 
 const MIN_WORDS = 300;
 const MAX_WORDS = 400;
@@ -25,6 +25,15 @@ export class Copywriter {
 
   private countWords(text: string): number {
     return text.trim().split(/\s+/).filter((w) => w.length > 0).length;
+  }
+
+  /** Strip trailing word-count lines the LLM sometimes appends despite instructions. */
+  private stripWordCount(text: string): string {
+    return text
+      .replace(/\n+\*{0,2}\(?[Ww]ord\s*[Cc]ount:?\s*\d+\s*\w*\)?\*{0,2}\s*$/i, '')
+      .replace(/\n+\*{0,2}\(?\d+\s+words?\)?\*{0,2}\s*$/i, '')
+      .replace(/\n+---\s*\n[\s\S]*\d+\s*words?[\s\S]*$/i, '')
+      .trimEnd();
   }
 
   /**
@@ -118,14 +127,15 @@ Output ONLY the article in markdown. No meta-commentary, no word count notes.`;
       this.log(`[Copywriter] Routing signal detected — new images required for "${item.title}"`);
     }
 
-    const wordCount = this.countWords(articleText);
+    const cleanedText = this.stripWordCount(articleText);
+    const wordCount = this.countWords(cleanedText);
     this.log(`[Copywriter] Draft written. Word count: ${wordCount}`);
 
     return {
       title: item.title,
       pillar: item.pillar,
       sourceUrl: item.link,
-      content: articleText,
+      content: cleanedText,
       images: item.images,
       wordCount,
     };
