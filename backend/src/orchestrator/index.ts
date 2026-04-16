@@ -695,8 +695,8 @@ export class Orchestrator {
         const completedTitle = indonesianTitle || item.title;
         this.publishedThisRun.push({ title: completedTitle, pillar: item.pillar });
 
-        // GREEN → dispatch Publisher
-        if (status === 'GREEN') {
+        // GREEN + YELLOW → dispatch Publisher (YELLOW = passed after revisions, still publish)
+        if (status === 'GREEN' || status === 'YELLOW') {
           const publishTitle = indonesianTitle || item.title;
           await this.tryPublish(articleId, publishTitle, finalHtml, currentImages, item.pillar, personaName);
         }
@@ -878,6 +878,13 @@ export class Orchestrator {
         'info',
         ORCHESTRATOR_IDENTITY
       );
+
+      // Pre-register this topic immediately — enforces 1-IP/Pillar/Pipeline-run rule.
+      // Adding the scout title here (before Researcher) means any later candidate
+      // covering the same IP is blocked by the runtime dedup check above, even if
+      // this attempt ends up RED or FAILED.  The editor pass also pushes the final
+      // Indonesian title so cross-pillar parallel queues see it too.
+      this.publishedThisRun.push({ title: topic.title, pillar });
 
       // Dispatch Researcher
       dispatchAgent('researcher', topic.title, (msg) => this.addLog(msg, 'info', ORCHESTRATOR_IDENTITY));
