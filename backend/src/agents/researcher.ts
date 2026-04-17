@@ -139,7 +139,7 @@ Respond in JSON format:
 
         // Filter to unseen, valid URLs, then evaluate all in parallel
         const candidates = images.filter(
-          (img) => img.imageUrl.startsWith('http') && !triedUrls.has(img.imageUrl)
+          (img) => img.imageUrl.startsWith('https://') && !triedUrls.has(img.imageUrl)
         );
         for (const img of candidates) triedUrls.add(img.imageUrl);
 
