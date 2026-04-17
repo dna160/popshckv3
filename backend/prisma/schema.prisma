@@ -53,10 +53,32 @@ model ProcessedUrl {
 }
 
 model PipelineRun {
-  id                String    @id @default(cuid())
-  status            String    // RUNNING, COMPLETED, FAILED, ABORTED
-  articlesProcessed Int       @default(0)
-  startedAt         DateTime  @default(now())
+  id                String        @id @default(cuid())
+  status            String        // RUNNING, COMPLETED, FAILED, ABORTED
+  articlesProcessed Int           @default(0)
+  startedAt         DateTime      @default(now())
   completedAt       DateTime?
-  logs              String?   @db.Text  // JSON array of PipelineLogEntry
+  logs              String?       @db.Text  // JSON array of PipelineLogEntry
+  videoDigests      VideoDigest[]
+}
+
+model VideoDigest {
+  id              String      @id @default(cuid())
+  runId           String
+  pillar          String
+  articleIds      String[]
+  voiceoverScript String?     @db.Text
+  caption         String?     @db.Text
+  reelVideoUrl    String?
+  storyVideoUrl   String?
+  status          String      // PROCESSING | POSTED | FAILED
+  igReelId        String?
+  igStoryId       String?
+  postedAt        DateTime?
+  createdAt       DateTime    @default(now())
+  errorLog        String?     @db.Text
+  pipelineRun     PipelineRun @relation(fields: [runId], references: [id])
+
+  @@index([runId])
+  @@index([pillar, createdAt])
 }

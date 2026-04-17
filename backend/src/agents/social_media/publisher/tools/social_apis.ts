@@ -394,6 +394,126 @@ export async function convertImageToVideo(imageBuffer: Buffer): Promise<Buffer> 
   }
 }
 
+// ── Instagram Video: Reels & Stories ─────────────────────────────────────────
+
+/**
+ * Shared poll-then-publish logic for video media containers.
+ * Polls up to 24 times (5s each = 2 min max) for the container to reach FINISHED.
+ */
+async function publishVideoContainer(
+  accountId:   string,
+  token:       string,
+  creationId:  string,
+  logPrefix:   string
+): Promise<string> {
+  const MAX_POLLS = 24;
+  const POLL_MS   = 5_000;
+
+  for (let i = 0; i < MAX_POLLS; i++) {
+    await new Promise(r => setTimeout(r, POLL_MS));
+    const statusRes = await fetch(
+      `https://graph.facebook.com/v22.0/${creationId}?fields=status_code&access_token=${token}`
+    );
+    if (statusRes.ok) {
+      const { status_code } = (await statusRes.json()) as { status_code?: string };
+      console.log(`${logPrefix} Container status: ${status_code ?? 'unknown'} (poll ${i + 1}/${MAX_POLLS})`);
+      if (status_code === 'FINISHED') break;
+      if (status_code === 'ERROR' || status_code === 'EXPIRED') {
+        throw new Error(`${logPrefix} Container failed with status: ${status_code}`);
+      }
+    }
+  }
+
+  const publishRes = await fetch(
+    `https://graph.facebook.com/v22.0/${accountId}/media_publish`,
+    {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ creation_id: creationId, access_token: token }),
+    }
+  );
+
+  if (!publishRes.ok) {
+    const err = await publishRes.text();
+    throw new Error(`${logPrefix} Publish failed (${publishRes.status}): ${err}`);
+  }
+
+  const { id: mediaId } = (await publishRes.json()) as { id: string };
+  return mediaId;
+}
+
+/**
+ * Publish a video as an Instagram Reel (permanent).
+ * @param videoUrl  Public URL of the MP4 file (e.g. WordPress media URL)
+ * @param caption   Full caption with hashtags
+ * @returns         Instagram media ID
+ */
+export async function postReelToInstagram(params: {
+  videoUrl: string;
+  caption:  string;
+}): Promise<string> {
+  const token     = requireEnv('IG_ACCESS_TOKEN');
+  const accountId = requireEnv('INSTAGRAM_BUSINESS_ACCOUNT_ID');
+  const { videoUrl, caption } = params;
+
+  const containerRes = await fetch(
+    `https://graph.facebook.com/v22.0/${accountId}/media`,
+    {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        media_type:   'REELS',
+        video_url:    videoUrl,
+        caption,
+        access_token: token,
+      }),
+    }
+  );
+
+  if (!containerRes.ok) {
+    const err = await containerRes.text();
+    throw new Error(`[Instagram Reel] Container creation failed (${containerRes.status}): ${err}`);
+  }
+
+  const { id: creationId } = (await containerRes.json()) as { id: string };
+  return publishVideoContainer(accountId, token, creationId, '[Instagram Reel]');
+}
+
+/**
+ * Publish a video as an Instagram Story (24h ephemeral).
+ * Stories do not accept a caption parameter.
+ * @param videoUrl  Public URL of the MP4 file
+ * @returns         Instagram media ID
+ */
+export async function postStoryVideoToInstagram(params: {
+  videoUrl: string;
+}): Promise<string> {
+  const token     = requireEnv('IG_ACCESS_TOKEN');
+  const accountId = requireEnv('INSTAGRAM_BUSINESS_ACCOUNT_ID');
+  const { videoUrl } = params;
+
+  const containerRes = await fetch(
+    `https://graph.facebook.com/v22.0/${accountId}/media`,
+    {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        media_type:   'STORIES',
+        video_url:    videoUrl,
+        access_token: token,
+      }),
+    }
+  );
+
+  if (!containerRes.ok) {
+    const err = await containerRes.text();
+    throw new Error(`[Instagram Story Video] Container creation failed (${containerRes.status}): ${err}`);
+  }
+
+  const { id: creationId } = (await containerRes.json()) as { id: string };
+  return publishVideoContainer(accountId, token, creationId, '[Instagram Story Video]');
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function requireEnv(name: string): string {

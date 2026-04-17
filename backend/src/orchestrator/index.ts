@@ -26,7 +26,8 @@ import { UnderquotaProtocol } from '../agents/scout-underquota';
 import { Researcher }        from '../agents/researcher';
 import { Editor }            from '../agents/editor';
 import { Publisher }              from '../agents/publisher/index';
-import { SocialMediaOrchestrator } from '../agents/social_media/orchestrator';
+import { SocialMediaOrchestrator }  from '../agents/social_media/orchestrator';
+import { VideoDigestOrchestrator }  from '../agents/video_digest/orchestrator';
 import { AnimeSatoshi }      from '../agents/copywriters/anime_satoshi/index';
 import { GamingHikari }      from '../agents/copywriters/gaming_hikari/index';
 import { InfotainmentKenji } from '../agents/copywriters/infotainment_kenji/index';
@@ -1078,6 +1079,16 @@ export class Orchestrator {
           logs:              JSON.stringify(this.logs),
         },
       });
+
+      // Fire Video Digest Pipeline — runs in parallel with completion, fire-and-forget
+      try {
+        const vdp = new VideoDigestOrchestrator(this.prisma);
+        vdp.run(this.runId).catch(err =>
+          this.addLog(`VDP error: ${(err as Error).message}`, 'error', ORCHESTRATOR_IDENTITY)
+        );
+      } catch (err) {
+        this.addLog(`VDP init failed: ${(err as Error).message}`, 'error', ORCHESTRATOR_IDENTITY);
+      }
 
       this.addLog(
         `${ORCHESTRATOR_IDENTITY} complete. ${articlesProcessed} articles published/queued.`,
