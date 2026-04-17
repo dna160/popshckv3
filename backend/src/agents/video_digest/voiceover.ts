@@ -11,7 +11,7 @@ export class Voiceover {
     const results = await Promise.all(
       storyboard.segments.map(async (seg) => {
         console.log(`[Voiceover] TTS segment ${seg.index}: "${seg.scriptLine.slice(0, 50)}..."`);
-        const { audioBuffer, durationMs } = await synthesize(seg.scriptLine, profile.voiceId);
+        const { audioBuffer, durationMs } = await synthesize(seg.scriptLine, profile.voiceId, seg.targetDurationMs);
         console.log(`[Voiceover] Segment ${seg.index} measured=${durationMs}ms`);
         return {
           segmentIndex:      seg.index,

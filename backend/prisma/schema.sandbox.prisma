@@ -1,0 +1,86 @@
+// SQLite-compatible sandbox schema for local pipeline testing.
+// VideoDigest.articleIds uses String (JSON) instead of String[] (not supported by SQLite).
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Article {
+  id            String       @id @default(cuid())
+  title         String
+  pillar        String
+  sourceUrl     String
+  status        String       @default("PROCESSING")
+  revisionCount Int          @default(0)
+  content       String?
+  contentHtml   String?
+  images        String?
+  editorNotes   String?
+  wpPostId      Int?
+  wpPostUrl     String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  socialPosts   SocialPost[]
+}
+
+model SocialPost {
+  id            String    @id @default(cuid())
+  articleId     String
+  article       Article   @relation(fields: [articleId], references: [id])
+  pillar        String
+  imageCopy     String
+  caption       String
+  postImageUrl  String?
+  storyImageUrl String?
+  status        String    @default("PENDING")
+  postedAt      DateTime?
+  igPostId      String?
+  fbPostId      String?
+  xPostId       String?
+  tiktokPostId  String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model ProcessedUrl {
+  id        String   @id @default(cuid())
+  url       String   @unique
+  createdAt DateTime @default(now())
+}
+
+model PipelineRun {
+  id                String        @id @default(cuid())
+  status            String
+  articlesProcessed Int           @default(0)
+  startedAt         DateTime      @default(now())
+  completedAt       DateTime?
+  logs              String?
+  videoDigests      VideoDigest[]
+}
+
+model VideoDigest {
+  id              String      @id @default(cuid())
+  runId           String
+  pillar          String
+  articleIds      String      @default("[]")  // JSON array stored as string
+  voiceoverScript String?
+  caption         String?
+  reelVideoUrl    String?
+  storyVideoUrl   String?
+  status          String
+  igReelId        String?
+  igStoryId       String?
+  postedAt        DateTime?
+  createdAt       DateTime    @default(now())
+  errorLog        String?
+  pipelineRun     PipelineRun @relation(fields: [runId], references: [id])
+
+  @@index([runId])
+  @@index([pillar, createdAt])
+}

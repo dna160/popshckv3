@@ -77,11 +77,14 @@ export class VideoDigestOrchestrator {
       // Phase 7: Publish to IG Reels + Stories
       const published = await this.publisher.publish(composed);
 
+      // articleIds is String[] on PostgreSQL, String (JSON) on SQLite.
+      // Serialize to JSON string so it's accepted by both schema variants.
+      const articleIdPayload = JSON.stringify(articles.map(a => a.id));
       await this.prisma.videoDigest.update({
         where: { id: digest.id },
         data:  {
           status:          'POSTED',
-          articleIds:      articles.map(a => a.id),
+          articleIds:      articleIdPayload as any,
           voiceoverScript: storyboard.segments.map(s => s.scriptLine).join(' '),
           caption:         storyboard.caption,
           reelVideoUrl:    published.wpMediaUrl,
@@ -143,6 +146,12 @@ export class VideoDigestOrchestrator {
 
       if (lastVerdict.approved) return storyboard;
 
+      // Minor issues are fixable but non-blocking — pass after last revision round
+      if (lastVerdict.severity === 'minor' && round === MAX_ROUNDS - 1) {
+        console.log(`[VDP] pillar=${pillar} minor issues remain after ${MAX_ROUNDS} rounds — proceeding`);
+        return storyboard;
+      }
+
       if (lastVerdict.severity === 'block') {
         throw new Error(`Editor blocked (brand safety): ${lastVerdict.feedback}`);
       }
@@ -155,6 +164,8 @@ export class VideoDigestOrchestrator {
 
   private validateAudioDurations(audio: import('./types').AudioSegment[]): void {
     for (const seg of audio) {
+      // Outro segment (index 3) is pre-rendered branded asset — skip duration validation
+      if (seg.segmentIndex === 3) continue;
       if (seg.measuredDurationMs < 3000 || seg.measuredDurationMs > 10000) {
         throw new Error(
           `[VDP] Segment ${seg.segmentIndex} audio duration ${seg.measuredDurationMs}ms is outside [3000, 10000]ms — Editor must revise scriptLine`

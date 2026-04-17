@@ -5,7 +5,8 @@ import type { Storyboard, AudioSegment, VideoSegment } from './types';
 
 const MAX_RETRIES        = 2;
 const RETRY_DELAYS_MS    = [5_000, 15_000];
-const BRAND_ASSETS_DIR   = path.resolve('backend/assets/video_digest/brand');
+// Resolve from CWD — callers (orchestrator, scripts) always run from the backend/ directory
+const BRAND_ASSETS_DIR   = path.resolve('assets/video_digest/brand');
 const GROK_MIN_SEC       = 5;
 const GROK_MAX_SEC       = 10;
 

@@ -1,11 +1,45 @@
-import { spawn } from 'child_process';
+import { spawn }       from 'child_process';
+import * as fs         from 'fs';
+import * as path       from 'path';
+
+/** Find ffmpeg binary — tries PATH, then ffmpeg-static npm package, then common install dirs. */
+function findFfmpeg(): string {
+  // 1. Respect explicit override
+  if (process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH;
+
+  // 2. ffmpeg-static npm package (bundled binary, works on all platforms)
+  // NODE_PATH may point to main project's node_modules (used in sandbox scripts)
+  const nodePathDirs = (process.env.NODE_PATH || '').split(path.delimiter).filter(Boolean);
+  const candidates = [
+    // From NODE_PATH (sandbox mode — worktree junction may not resolve)
+    ...nodePathDirs.map(d => path.join(d, 'ffmpeg-static', 'ffmpeg.exe')),
+    ...nodePathDirs.map(d => path.join(d, 'ffmpeg-static', 'ffmpeg')),
+    // From CWD node_modules (production mode)
+    path.join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg.exe'),
+    path.join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg'),
+    // BlueStacks bundled ffmpeg (Windows only)
+    'C:\\Program Files\\BlueStacks_nxt\\ffmpeg.exe',
+    // Common winget / manual install paths on Windows
+    'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',
+    'C:\\Program Files\\Gyan.FFmpeg\\bin\\ffmpeg.exe',
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) {
+      console.log(`[FFmpeg] Using: ${c}`);
+      return c;
+    }
+  }
+  return 'ffmpeg'; // Fall through to PATH
+}
+
+const FFMPEG_BIN = findFfmpeg();
 
 /**
  * Run ffmpeg with the given argument list. Rejects on non-zero exit.
  */
 export async function runFfmpeg(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawn(FFMPEG_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     const stderr: string[] = [];
 
     proc.stderr.on('data', (chunk: Buffer) => stderr.push(chunk.toString()));

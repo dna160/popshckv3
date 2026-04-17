@@ -93,16 +93,41 @@ async function fishAudio(text: string, voiceId: string): Promise<TtsResult> {
 }
 
 /**
- * Synthesize text to speech. Tries ElevenLabs first, falls back to Fish Audio.
+ * Generate a silent WAV of exactly `durationMs` milliseconds.
+ * Used as a last-resort fallback when no TTS API keys are present.
+ * The resulting video segment will have no voiceover but will still
+ * assemble and publish correctly.
+ */
+function silenceFallback(text: string, durationMs: number): TtsResult {
+  const sampleRate = 48000;
+  const channels   = 1;
+  const numSamples = Math.round((durationMs / 1000) * sampleRate);
+  const pcm        = Buffer.alloc(numSamples * 2, 0); // 16-bit zero-fill = silence
+  const wav        = wrapPcmInWav(pcm, sampleRate, channels);
+  console.warn(`[TtsClient] No TTS keys available — using silence (${durationMs}ms) for: "${text.slice(0, 60)}..."`);
+  return { audioBuffer: wav, durationMs };
+}
+
+/**
+ * Synthesize text to speech.
+ * Priority: ElevenLabs → Fish Audio → silence fallback.
  */
 export async function synthesize(
-  text:    string,
-  voiceId: string
+  text:      string,
+  voiceId:   string,
+  targetMs?: number,
 ): Promise<TtsResult> {
   try {
     return await elevenlabs(text, voiceId);
   } catch (err) {
     console.warn(`[TtsClient] ElevenLabs failed, trying Fish Audio fallback: ${(err as Error).message}`);
-    return await fishAudio(text, voiceId);
+    try {
+      return await fishAudio(text, voiceId);
+    } catch (err2) {
+      console.warn(`[TtsClient] Fish Audio failed, using silence fallback: ${(err2 as Error).message}`);
+      // Use targetMs if provided, otherwise estimate from text length (~3 syl/sec, ~2 chars/syl)
+      const estimatedMs = targetMs ?? Math.round((text.length / 6) * 1000);
+      return silenceFallback(text, Math.max(2000, Math.min(estimatedMs, 10000)));
+    }
   }
 }

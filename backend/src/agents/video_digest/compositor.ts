@@ -1,12 +1,21 @@
 import * as fs   from 'fs';
 import * as path from 'path';
 import * as os   from 'os';
+
+/** Returns the path only if the file exists AND has non-zero size. */
+function validFile(p: string): string | null {
+  try {
+    return fs.existsSync(p) && fs.statSync(p).size > 0 ? p : null;
+  } catch {
+    return null;
+  }
+}
 import { runFfmpeg, ffmpegSegmentCmd, ffmpegKenBurnsCmd } from './tools/ffmpeg_utils';
 import type {
   Pillar, Storyboard, AudioSegment, VideoSegment, ComposedVideo,
 } from './types';
 
-const WATERMARK_PATH = path.resolve('backend/assets/video_digest/brand/watermark.png');
+const WATERMARK_PATH = path.resolve('assets/video_digest/brand/watermark.png');
 
 export class Compositor {
   async assemble(
@@ -39,21 +48,56 @@ export class Compositor {
         const segOut  = path.join(workDir, `seg_${i}.mp4`);
         const audioIn = path.join(workDir, `a_${i}.wav`);
 
+        // Outro with empty buffer: generate branded black screen
+        if (isOutro && vSeg.videoBuffer.length === 0) {
+          console.warn(`[Compositor] Outro brand asset empty — generating placeholder screen`);
+          await runFfmpeg([
+            '-f',       'lavfi',
+            '-i',       `color=c=black:s=1080x1920:d=${durSec}`,
+            '-i',       audioIn,
+            '-shortest',
+            '-c:v',     'libx264',
+            '-c:a',     'aac',
+            '-y',       segOut,
+          ]);
+          continue;
+        }
+
         // Grok fallback: empty buffer means static Ken Burns
         if (!isOutro && vSeg.videoBuffer.length === 0) {
-          // Download featured image for Ken Burns effect
-          const imgPath  = path.join(workDir, `img_${i}.jpg`);
-          await downloadImage(seg.imageUrl!, imgPath);
+          const imgPath = path.join(workDir, `img_${i}.jpg`);
+          let imageAvailable = false;
+          if (seg.imageUrl) {
+            try {
+              await downloadImage(seg.imageUrl, imgPath);
+              imageAvailable = true;
+            } catch {
+              console.warn(`[Compositor] Image download failed for segment ${i} — using black screen fallback`);
+            }
+          }
 
-          const args = ffmpegKenBurnsCmd({
-            imageIn:     imgPath,
-            audioIn,
-            out:         segOut,
-            durationSec: durSec,
-            lowerThird:  seg.lowerThirdText || null,
-            watermark:   fs.existsSync(WATERMARK_PATH) ? WATERMARK_PATH : null,
-          });
-          await runFfmpeg(args);
+          if (imageAvailable) {
+            const args = ffmpegKenBurnsCmd({
+              imageIn:     imgPath,
+              audioIn,
+              out:         segOut,
+              durationSec: durSec,
+              lowerThird:  seg.lowerThirdText || null,
+              watermark:   validFile(WATERMARK_PATH),
+            });
+            await runFfmpeg(args);
+          } else {
+            // Pure black screen with audio — still shows lower-third text
+            await runFfmpeg([
+              '-f',       'lavfi',
+              '-i',       `color=c=0x1a1a2e:s=1080x1920:d=${durSec}`,
+              '-i',       audioIn,
+              '-shortest',
+              '-c:v',     'libx264',
+              '-c:a',     'aac',
+              '-y',       segOut,
+            ]);
+          }
           continue;
         }
 
@@ -64,7 +108,7 @@ export class Compositor {
           out:        segOut,
           durationSec: durSec,
           lowerThird: isOutro ? null : (seg.lowerThirdText || null),
-          watermark:  isOutro ? null : (fs.existsSync(WATERMARK_PATH) ? WATERMARK_PATH : null),
+          watermark:  isOutro ? null : (validFile(WATERMARK_PATH)),
         });
         await runFfmpeg(args);
       }
