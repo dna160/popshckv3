@@ -114,6 +114,9 @@ export async function evaluateImageRelevance(
   topic: string,
   pillar: string
 ): Promise<boolean> {
+  // xAI vision API only supports HTTPS image URLs
+  if (!imageUrl.startsWith('https://')) return false;
+
   try {
     await rateLimiter.acquire();
     const response = await withTimeout(llmClient.chat.completions.create({
