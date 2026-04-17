@@ -1,4 +1,3 @@
-import OpenAI from 'openai';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -7,16 +6,19 @@ if (!process.env.XAI_API_KEY) {
   throw new Error('XAI_API_KEY environment variable is required');
 }
 
-export const llmClient = new OpenAI({
-  apiKey: process.env.XAI_API_KEY,
-  baseURL: 'https://api.x.ai/v1',
-});
-
+const XAI_API_KEY = process.env.XAI_API_KEY;
+const XAI_BASE_URL = 'https://api.x.ai/v1';
 export const MODEL = 'grok-4-1-fast-reasoning';
+
+export type ChatMessageContent = string | Array<{
+  type: 'text' | 'image_url';
+  text?: string;
+  image_url?: { url: string };
+}>;
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string | OpenAI.ChatCompletionContentPart[];
+  content: ChatMessageContent;
 }
 
 // ── Rate limiter: 900 requests per minute (sliding window) ────────────────────
@@ -79,36 +81,42 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-/**
- * Send a chat completion request to Grok via xAI API.
- */
 export async function chat(
   messages: ChatMessage[],
   opts: { temperature?: number; maxTokens?: number } = {}
 ): Promise<string> {
   await rateLimiter.acquire();
   const response = await withTimeout(
-    llmClient.chat.completions.create({
-      model: MODEL,
-      messages: messages as OpenAI.ChatCompletionMessageParam[],
-      temperature: opts.temperature ?? 0.7,
-      max_tokens: opts.maxTokens ?? 2048,
+    fetch(`${XAI_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${XAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages,
+        temperature: opts.temperature ?? 0.7,
+        max_tokens: opts.maxTokens ?? 2048,
+      }),
+    }).then(async (res) => {
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(`xAI API error: ${res.status} ${JSON.stringify(err)}`);
+      }
+      return res.json();
     }),
     CHAT_TIMEOUT_MS,
     'chat'
   );
 
-  const content = response.choices[0]?.message?.content;
+  const content = response.choices?.[0]?.message?.content;
   if (!content) {
     throw new Error('LLM returned empty response');
   }
-  return content.trim();
+  return typeof content === 'string' ? content.trim() : '';
 }
 
-/**
- * Ask Grok to evaluate an image URL for relevance to a topic.
- * Returns YES or NO.
- */
 export async function evaluateImageRelevance(
   imageUrl: string,
   topic: string,
@@ -116,35 +124,51 @@ export async function evaluateImageRelevance(
 ): Promise<boolean> {
   try {
     await rateLimiter.acquire();
-    const response = await withTimeout(llmClient.chat.completions.create({
-      model: MODEL,
-      messages: [
-        {
-          role: 'user',
-          content: [
+    const response = await withTimeout(
+      fetch(`${XAI_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${XAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: MODEL,
+          messages: [
             {
-              type: 'text',
-              text: `You are evaluating whether an image is relevant to an article about "${topic}" in the "${pillar}" content pillar.
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: `You are evaluating whether an image is relevant to an article about "${topic}" in the "${pillar}" content pillar.
 
 Respond with ONLY "YES" if the image is clearly relevant and high quality, or "NO" if it is irrelevant, low quality, or inappropriate.
 
 Image URL: ${imageUrl}`,
-            },
-            {
-              type: 'image_url',
-              image_url: { url: imageUrl },
+                },
+                {
+                  type: 'image_url',
+                  image_url: { url: imageUrl },
+                },
+              ],
             },
           ],
-        },
-      ],
-      max_tokens: 10,
-      temperature: 0,
-    }), CHAT_TIMEOUT_MS, 'vision');
+          max_tokens: 10,
+          temperature: 0,
+        }),
+      }).then(async (res) => {
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(`xAI API error: ${res.status} ${JSON.stringify(err)}`);
+        }
+        return res.json();
+      }),
+      CHAT_TIMEOUT_MS,
+      'vision'
+    );
 
-    const answer = response.choices[0]?.message?.content?.trim().toUpperCase();
+    const answer = response.choices?.[0]?.message?.content?.trim?.().toUpperCase?.();
     return answer === 'YES';
   } catch (err) {
-    // If vision evaluation fails (e.g., image inaccessible), default to false
     console.warn(`Vision evaluation failed for ${imageUrl}:`, err);
     return false;
   }
