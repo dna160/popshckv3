@@ -141,10 +141,14 @@ export class Orchestrator {
   private logs:                     PipelineLogEntry[] = [];
   private abortSignal:              AbortSignal | null = null;
   private onRunId:                  ((id: string) => void) | null = null;
-  /** Titles of articles completed (GREEN/YELLOW/PUBLISHED) in the current run.
-   *  Used for same-run deduplication so late-queue candidates don't repeat
-   *  a topic that a parallel pillar queue already published. */
-  private publishedThisRun:   Array<{ title: string; pillar: string }> = [];
+  /** Titles (scout + Indonesian) of topics started in the current run.
+   *  Used for Jaccard-based same-run deduplication against topic titles. */
+  private publishedThisRun: Array<{ title: string; pillar: string }> = [];
+  /** Source URLs of every topic we have started processing this run.
+   *  A URL-exact check that catches same-story duplicates whose titles differ
+   *  enough to slip under the Jaccard threshold (e.g. same natalie.mu URL
+   *  picked up by two different RSS feeds with differently-worded headlines). */
+  private processedLinksThisRun: Set<string> = new Set();
 
   constructor(prisma: PrismaClient, abortSignal?: AbortSignal, onRunId?: (id: string) => void) {
     this.prisma      = prisma;
@@ -207,6 +211,37 @@ export class Orchestrator {
     recentTitles: Array<{ title: string; pillar: string }>,
     target:       number
   ): void {
+    // ── Pre-pass: cross-pillar URL dedup ──────────────────────────────────────
+    // The same source URL can appear in multiple pillar buckets if two RSS feeds
+    // filed the same story under different categories.  Jaccard won't catch this
+    // when the titles are worded differently enough.  Remove the second occurrence
+    // across pillars (keep the first pillar that claimed it).
+    const seenUrls = new Set<string>();
+    let urlDupCount = 0;
+    for (const pillar of PILLARS) {
+      const before = buckets[pillar].length;
+      buckets[pillar] = buckets[pillar].filter((item) => {
+        if (seenUrls.has(item.link)) {
+          this.addLog(
+            `[Brain] Cross-pillar URL dup [${pillar}]: "${item.title}" — source already queued in another pillar`,
+            'warn',
+            ORCHESTRATOR_IDENTITY
+          );
+          return false;
+        }
+        seenUrls.add(item.link);
+        return true;
+      });
+      urlDupCount += before - buckets[pillar].length;
+    }
+    if (urlDupCount > 0) {
+      this.addLog(
+        `[Brain] URL pre-pass removed ${urlDupCount} cross-pillar duplicate(s) by source URL`,
+        'warn',
+        ORCHESTRATOR_IDENTITY
+      );
+    }
+
     // Pre-tokenise recent DB articles grouped by pillar
     const recentByPillar: Partial<Record<string, Array<{ title: string; tokens: Set<string> }>>> = {};
     for (const article of recentTitles) {
@@ -852,10 +887,23 @@ export class Orchestrator {
 
       processedIdx++;
 
-      // ── Runtime dedup: check against 24h DB window + same-run published ──────
+      // ── Runtime dedup: URL-exact check first, then Jaccard title check ────────
       // Catches duplicates that slipped through the scouting-phase dedup:
       // brain-backup items, topics banked from previous runs, or topics whose
       // counterpart was published by a parallel pillar queue in this same run.
+
+      // 1. URL-exact: same source URL = same story, regardless of headline wording.
+      if (this.processedLinksThisRun.has(topic.link)) {
+        this.addLog(
+          `[Brain] URL dedup [${pillar}]: "${topic.title}" — source URL already processed this run → discarded`,
+          'warn',
+          ORCHESTRATOR_IDENTITY
+        );
+        await this.scout.markProcessed(topic.link);
+        continue;
+      }
+
+      // 2. Jaccard title similarity: catches same IP reported by different sources.
       const topicTokens = titleTokens(topic.title);
       const allRecent   = [...recentTitles, ...this.publishedThisRun];
       const dupMatch    = allRecent.find((recent) =>
@@ -880,10 +928,12 @@ export class Orchestrator {
       );
 
       // Pre-register this topic immediately — enforces 1-IP/Pillar/Pipeline-run rule.
-      // Adding the scout title here (before Researcher) means any later candidate
-      // covering the same IP is blocked by the runtime dedup check above, even if
-      // this attempt ends up RED or FAILED.  The editor pass also pushes the final
-      // Indonesian title so cross-pillar parallel queues see it too.
+      // Both the source URL and the scout title are locked in here so that:
+      //   • processedLinksThisRun blocks same-URL duplicates (URL-exact match)
+      //   • publishedThisRun blocks same-IP duplicates (Jaccard title match)
+      // Either check blocks a later candidate regardless of whether this attempt
+      // ends up RED or FAILED.
+      this.processedLinksThisRun.add(topic.link);
       this.publishedThisRun.push({ title: topic.title, pillar });
 
       // Dispatch Researcher
@@ -967,6 +1017,7 @@ export class Orchestrator {
     this.logs                    = [];
     this.socialPostCountByPillar = new Map(); // reset per-run social post quota
     this.publishedThisRun        = [];
+    this.processedLinksThisRun   = new Set();
 
     const pipelineRun = await this.prisma.pipelineRun.create({
       data: { status: 'RUNNING' },
