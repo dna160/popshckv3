@@ -137,6 +137,7 @@ export class Orchestrator {
   private copywriters:              Record<Pillar, CopywriterAgent>;
   private socialMediaOrchestrator:  SocialMediaOrchestrator;
   private socialPostCountByPillar:  Map<string, number> = new Map();
+  private socialMediaTasks:         Promise<void>[]     = [];
   private runId:                    string | null = null;
   private logs:                     PipelineLogEntry[] = [];
   private abortSignal:              AbortSignal | null = null;
@@ -825,7 +826,7 @@ export class Orchestrator {
             'info',
             ORCHESTRATOR_IDENTITY
           );
-          this.socialMediaOrchestrator
+          const task = this.socialMediaOrchestrator
             .runForArticle({
               articleId,
               pillar,
@@ -839,6 +840,7 @@ export class Orchestrator {
                 ORCHESTRATOR_IDENTITY
               )
             );
+          this.socialMediaTasks.push(task);
         }
       }
     } catch (err) {
@@ -1016,6 +1018,7 @@ export class Orchestrator {
   async run(): Promise<{ runId: string; articlesProcessed: number }> {
     this.logs                    = [];
     this.socialPostCountByPillar = new Map(); // reset per-run social post quota
+    this.socialMediaTasks        = [];        // reset per-run social task registry
     this.publishedThisRun        = [];
     this.processedLinksThisRun   = new Set();
 
@@ -1068,6 +1071,20 @@ export class Orchestrator {
       await bank.save((msg) => this.addLog(msg, 'info', ORCHESTRATOR_IDENTITY));
 
       articlesProcessed = pillarResults.reduce((sum, count) => sum + count, 0);
+
+      // ── Phase 3: Await all social media tasks ─────────────────────────────────
+      // Social tasks were queued fire-and-forget during Phase 2 so they don't
+      // block individual article processing. We collect them and await here so
+      // the worker thread doesn't exit before social posts complete.
+      if (this.socialMediaTasks.length > 0) {
+        this.addLog(
+          `[Social] Awaiting ${this.socialMediaTasks.length} social media pipeline(s)…`,
+          'info',
+          ORCHESTRATOR_IDENTITY
+        );
+        await Promise.allSettled(this.socialMediaTasks);
+        this.addLog('[Social] All social media pipelines complete.', 'info', ORCHESTRATOR_IDENTITY);
+      }
 
       await this.prisma.pipelineRun.update({
         where: { id: this.runId },
