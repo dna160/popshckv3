@@ -84,6 +84,42 @@ export const PRIORITY_FEEDS: FeedConfig[] = [
 ];
 
 /**
+ * ── Tier 3: Fallback / Expansion Feeds (Underquota Protocol Only) ─────────────
+ *
+ * NOT used by Scout's Round 1. Activated EXCLUSIVELY by Underquota Protocol
+ * when the primary tagged feeds are exhausted within a pipeline run.
+ *
+ * Rationale: Round 1 stays focused on its proven high-quality sources. When
+ * Underquota fires for a deficit pillar, it gets access to a SECOND pool of
+ * sources that haven't been touched yet in this run — bypassing the
+ * triagedUrls dedup that empties the primary pool after 1-2 underquota rounds.
+ *
+ * Selection criteria:
+ *   • Sources with proven historical pillar affinity (animecorner, toyark)
+ *   • Well-known English-language Japanese pop-culture publications
+ *   • Sources NOT already in PRIORITY_FEEDS (otherwise they'd be deduped out)
+ *
+ * Failed feeds (404, network) return [] gracefully — no impact on success path.
+ */
+export const FALLBACK_FEEDS: FeedConfig[] = [
+  // ── Anime / Manga / Gaming combined coverage ──────────────────────────────
+  { url: 'https://animecorner.me/feed/',                  tags: ['anime', 'manga', 'gaming'] },
+
+  // ── Toys / Collectibles ───────────────────────────────────────────────────
+  { url: 'https://www.toyark.com/feed/',                  tags: ['toys'] },
+
+  // ── Japanese pop-culture / infotainment ───────────────────────────────────
+  { url: 'https://soranews24.com/feed/',                  tags: ['infotainment', 'anime', 'gaming'] },
+  { url: 'https://otakuusamagazine.com/feed/',            tags: ['anime', 'manga', 'infotainment'] },
+
+  // ── Manga-specific ────────────────────────────────────────────────────────
+  { url: 'https://www.cbr.com/feed/category/manga-news/', tags: ['manga'] },
+
+  // ── Anime-specific ────────────────────────────────────────────────────────
+  { url: 'https://www.cbr.com/feed/category/anime-news/', tags: ['anime'] },
+];
+
+/**
  * ── Tier 1: Priority — Subpillar Branch Feeds (Underquota Protocol) ──────────
  *
  * Activated ONLY when the Master Orchestrator detects a quota deficit after
@@ -127,10 +163,11 @@ export const RSS_FEEDS: Record<Pillar, string[]> = {
 
 /**
  * Lookup map: primary feed URL → fallback URL.
- * Built automatically from PRIORITY_FEEDS so callers don't have to scan the array.
+ * Built automatically from PRIORITY_FEEDS + FALLBACK_FEEDS so callers don't
+ * have to scan the arrays.
  */
 export const FEED_FALLBACK_MAP: ReadonlyMap<string, string> = new Map(
-  PRIORITY_FEEDS
+  [...PRIORITY_FEEDS, ...FALLBACK_FEEDS]
     .filter((f): f is FeedConfig & { fallback: string } => Boolean(f.fallback))
     .map((f) => [f.url, f.fallback])
 );

@@ -23,15 +23,20 @@
 import path from 'path';
 import fs   from 'fs/promises';
 import { PrismaClient }            from '@prisma/client';
-import { fetchFeed, PRIORITY_FEEDS, FEED_FALLBACK_MAP } from '../services/rss';
+import { fetchFeed, PRIORITY_FEEDS, FALLBACK_FEEDS, FEED_FALLBACK_MAP } from '../services/rss';
 import { chat, parseJsonResponse }  from '../services/llm';
 import { PILLARS }                  from '../shared/types';
 import type { Pillar, ScoutItem }   from '../shared/types';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const UNDERQUOTA_POOL_SIZE = 50;
+const UNDERQUOTA_POOL_SIZE = 100;  // expanded from 50 — Underquota now pulls from
+                                    // PRIORITY_FEEDS + FALLBACK_FEEDS so the raw
+                                    // pool is larger and we want a bigger window
+                                    // before dedup against triagedUrls
 const BATCH_SIZE           = 10;
-const AGE_LIMIT_DAYS       = 7;
+const AGE_LIMIT_DAYS       = 14;   // extended from 7 — under-served pillars
+                                    // (toys, infotainment, manga) often have
+                                    // older articles still relevant to readers
 const MEMORY_FILE          = path.join(process.cwd(), 'data', 'feed-memory.json');
 
 // ── Lightweight FeedMemory reader (read-only, shared file with Scout) ────────
@@ -131,10 +136,13 @@ function fairPillarInterleave(
     lanes.get(key)!.push(source);
   }
 
-  // Lane priority: target pillars first (in given order), then everything else
+  // Lane priority: target pillars first, THEN unknown (untrained feeds — most
+  // are fallback feeds we just added, e.g. soranews24, cbr, otakuusamagazine —
+  // they're high-potential for the target pillars but lack memory yet),
+  // THEN off-target pillars last.
   const targetSet = new Set<Pillar>(targetPillars);
   const otherPillars = PILLARS.filter((p) => !targetSet.has(p));
-  const lanePriority: LaneKey[] = [...targetPillars, ...otherPillars, 'unknown'];
+  const lanePriority: LaneKey[] = [...targetPillars, 'unknown', ...otherPillars];
 
   // Round-robin across lanes, then sources within each lane
   const result: PoolItem[] = [];
@@ -205,14 +213,21 @@ export class UnderquotaProtocol {
   }
 
   /**
-   * Return the URLs of every PRIORITY_FEEDS entry whose tags include at least
-   * one of the target pillars, deduplicated and in declaration order.
+   * Return the URLs of every PRIORITY_FEEDS + FALLBACK_FEEDS entry whose tags
+   * include at least one of the target pillars, deduplicated and in
+   * declaration order (PRIORITY_FEEDS first, FALLBACK_FEEDS appended).
+   *
+   * The FALLBACK_FEEDS expansion is critical: PRIORITY_FEEDS items are mostly
+   * already in `triagedUrls` after Round 1, so without the fallback expansion
+   * the underquota pool empties after 1-2 rounds. FALLBACK_FEEDS are
+   * NOT used by Round 1, so their items are guaranteed fresh on the first
+   * underquota dispatch.
    */
   private getFeedsForPillars(targetPillars: Pillar[]): string[] {
     const seen = new Set<string>();
     const urls: string[] = [];
 
-    for (const feed of PRIORITY_FEEDS) {
+    for (const feed of [...PRIORITY_FEEDS, ...FALLBACK_FEEDS]) {
       if (feed.tags.some((tag) => targetPillars.includes(tag))) {
         if (!seen.has(feed.url)) {
           seen.add(feed.url);
