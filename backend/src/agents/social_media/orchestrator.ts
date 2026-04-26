@@ -202,17 +202,16 @@ export class SocialMediaOrchestrator {
       storyImageUrl,
       status:        anyPosted ? 'POSTED' : 'FAILED',
       postedAt:      anyPosted ? new Date() : undefined,
-      igPostId:      socialResult.igPostId,
-      igStoryId:     socialResult.igStoryId,
-      fbPostId:      socialResult.fbPostId,
-      xPostId:       socialResult.xPostId,
-      tiktokPostId:  socialResult.tiktokPostId,
+      igPostId:  socialResult.igPostId,
+      igStoryId: socialResult.igStoryId,
+      fbPostId:  socialResult.fbPostId,
+      xPostId:   socialResult.xPostId,
     });
 
     this.log(
       `[SocialOrchestrator] ✓ Done for article ${articleId} — ` +
       `IG feed:${!!socialResult.igPostId} IG story:${!!socialResult.igStoryId} ` +
-      `FB:${!!socialResult.fbPostId} X:${!!socialResult.xPostId} TikTok:${!!socialResult.tiktokPostId}`
+      `FB:${!!socialResult.fbPostId} X:${!!socialResult.xPostId}`
     );
   }
 
@@ -227,11 +226,10 @@ export class SocialMediaOrchestrator {
     storyImageUrl?: string;
     status:        string;
     postedAt?:     Date;
-    igPostId?:     string;
-    igStoryId?:    string;
-    fbPostId?:     string;
-    xPostId?:      string;
-    tiktokPostId?: string;
+    igPostId?:  string;
+    igStoryId?: string;
+    fbPostId?:  string;
+    xPostId?:   string;
   }): Promise<void> {
     try {
       await this.prisma.socialPost.create({ data: params });
