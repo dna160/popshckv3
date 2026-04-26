@@ -815,14 +815,23 @@ export class Orchestrator {
         ORCHESTRATOR_IDENTITY
       );
 
-      // ── Social Media Coordinator (fire-and-forget, 3 per pillar cap) ─────────
+      // ── Social Media Coordinator ──────────────────────────────────────────────
       const socialCount = this.socialPostCountByPillar.get(pillar) ?? 0;
-      if (socialCount < MAX_SOCIAL_POSTS_PER_PILLAR) {
+      this.addLog(
+        `[Social] Check for "${title}": count=${socialCount}/${MAX_SOCIAL_POSTS_PER_PILLAR} pillar=${pillar} images=${images.length} wpPostUrl=${wpPostUrl}`,
+        'info',
+        ORCHESTRATOR_IDENTITY
+      );
+      if (socialCount >= MAX_SOCIAL_POSTS_PER_PILLAR) {
+        this.addLog(`[Social] Pillar ${pillar} quota reached (${socialCount}/${MAX_SOCIAL_POSTS_PER_PILLAR}) — skipping`, 'info', ORCHESTRATOR_IDENTITY);
+      } else {
         const featuredImage = images.find((img) => img.isFeatured) ?? images[0];
-        if (featuredImage) {
+        if (!featuredImage) {
+          this.addLog(`[Social] No featured image for "${title}" — skipping social post`, 'warn', ORCHESTRATOR_IDENTITY);
+        } else {
           this.socialPostCountByPillar.set(pillar, socialCount + 1);
           this.addLog(
-            `[Social] Queuing pipeline for "${title}" (${socialCount + 1}/${MAX_SOCIAL_POSTS_PER_PILLAR} for ${pillar})`,
+            `[Social] Queuing pipeline for "${title}" (${socialCount + 1}/${MAX_SOCIAL_POSTS_PER_PILLAR} for ${pillar}) imageUrl=${featuredImage.url}`,
             'info',
             ORCHESTRATOR_IDENTITY
           );
@@ -1076,6 +1085,11 @@ export class Orchestrator {
       // Social tasks were queued fire-and-forget during Phase 2 so they don't
       // block individual article processing. We collect them and await here so
       // the worker thread doesn't exit before social posts complete.
+      this.addLog(
+        `[Social] Phase 3: ${this.socialMediaTasks.length} social task(s) queued across all pillars`,
+        'info',
+        ORCHESTRATOR_IDENTITY
+      );
       if (this.socialMediaTasks.length > 0) {
         this.addLog(
           `[Social] Awaiting ${this.socialMediaTasks.length} social media pipeline(s)…`,
@@ -1084,6 +1098,8 @@ export class Orchestrator {
         );
         await Promise.allSettled(this.socialMediaTasks);
         this.addLog('[Social] All social media pipelines complete.', 'info', ORCHESTRATOR_IDENTITY);
+      } else {
+        this.addLog('[Social] No social tasks were queued — check [Social] Check logs above for reason.', 'warn', ORCHESTRATOR_IDENTITY);
       }
 
       await this.prisma.pipelineRun.update({
