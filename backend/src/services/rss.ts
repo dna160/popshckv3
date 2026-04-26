@@ -129,96 +129,70 @@ export const PRIORITY_FEEDS: FeedConfig[] = [
   },
 
   // ─────────────────────────────────────────────────────────────────────────
-  //   UNVERIFIED — feeds configured but never recorded items in FeedMemory.
-  //   Possible causes: broken URL, LLM rejects all output as off-pillar, or
-  //   items aggregated through a proxy (chaosphere) that takes the credit.
-  //   Kept in the list at low priority — failures cost nothing (parser
-  //   returns []), and any successful pulls help fill scarce-pillar buckets.
-  //   Underquota Protocol drains these LAST, after high/medium-confidence
-  //   sources are exhausted.
+  //   MASTODON PROXIES — Japanese publication aggregators served via
+  //   rss-mstdn.studiofreesia.com.  These URLs were ALREADY in the codebase
+  //   as fallbacks for the now-dead natalie.mu/* and oricon.co.jp/* primary
+  //   URLs (every primary returned 404/403/410 in the live diagnostic).
+  //   Promoting them to primaries makes the config honest — the system was
+  //   already silently using these every run.
+  //
+  //   Each proxy aggregates a DIFFERENT Japanese publication:
+  //     @animeanime — animeanime.jp (anime news + glossy/figure crossovers)
+  //     @gamespark  — gamespark.jp  (gaming news, JP indie & gacha coverage)
+  //     @oricon_news — oricon.co.jp (J-pop, idols, drama, films, charts)
+  //
+  //   They have 0 entries in feed-memory.json because past pipeline runs
+  //   either couldn't reach them or attributed items elsewhere.  Marked
+  //   'unverified' until first run produces measurable LLM-approved output.
   // ─────────────────────────────────────────────────────────────────────────
 
-  // Natalie.mu subpillar verticals — 0 items recorded in our memory, but the
-  // Mastodon proxy chaosphere does surface natalie.mu content (counted under
-  // chaosphere, not natalie.mu, due to source URL attribution).
+  // Anime — animeanime.jp aggregator.  Returns 20 items per fetch with
+  // current pubDates.  Anime news, voice-actor coverage, figure/glossy crossovers.
   {
-    url:        'https://natalie.mu/comic/feed',
-    tags:       ['manga'],
+    url:        'https://rss-mstdn.studiofreesia.com/@animeanime.rss',
+    tags:       ['anime', 'toys'],
     confidence: 'unverified',
-    fallback:   'https://rss-mstdn.studiofreesia.com/@natalie_mu_comic.rss',
   },
+
+  // Gaming — gamespark.jp aggregator.  Returns 20 items per fetch.  Western
+  // gaming + JP gacha/MMO coverage.  Gaming bucket usually doesn't need help,
+  // but kept for completeness.
   {
-    url:        'https://natalie.mu/anime/feed',
-    tags:       ['anime'],
-    confidence: 'unverified',
-    fallback:   'https://rss-mstdn.studiofreesia.com/@animeanime.rss',
-  },
-  {
-    url:        'https://natalie.mu/game/feed',
+    url:        'https://rss-mstdn.studiofreesia.com/@gamespark.rss',
     tags:       ['gaming'],
     confidence: 'unverified',
-    fallback:   'https://rss-mstdn.studiofreesia.com/@gamespark.rss',
-  },
-  {
-    url:        'https://natalie.mu/music/feed',
-    tags:       ['infotainment'],
-    confidence: 'unverified',
-    fallback:   'https://rss-mstdn.studiofreesia.com/@oricon_news.rss',
   },
 
-  // Oricon — Japan's Billboard equivalent (J-pop, idols, drama, films).
-  // The only sources tagged for infotainment that aren't Mastodon-proxied.
-  // 0 items in memory but kept active because they're our strongest
-  // structural answer for the infotainment pillar.
+  // Infotainment — oricon.co.jp aggregator.  THE primary structural answer
+  // for the infotainment pillar.  All 4 dead oricon.co.jp/rss/* entries used
+  // to fall back to this same URL (massive redundancy — fetched the same 20
+  // items 4× per run).  Now consolidated into one entry.
   {
-    url:        'https://www.oricon.co.jp/rss/news/',
+    url:        'https://rss-mstdn.studiofreesia.com/@oricon_news.rss',
     tags:       ['infotainment'],
-    confidence: 'unverified',
-    fallback:   'https://rss-mstdn.studiofreesia.com/@oricon_news.rss',
-  },
-  {
-    url:        'https://www.oricon.co.jp/rss/music/',
-    tags:       ['infotainment'],
-    confidence: 'unverified',
-    fallback:   'https://rss-mstdn.studiofreesia.com/@oricon_news.rss',
-  },
-  {
-    url:        'https://www.oricon.co.jp/rss/movie/',
-    tags:       ['infotainment', 'anime'],
-    confidence: 'unverified',
-    fallback:   'https://rss-mstdn.studiofreesia.com/@oricon_news.rss',
-  },
-  {
-    url:        'https://www.oricon.co.jp/rss/special/',
-    tags:       ['infotainment'],
-    confidence: 'unverified',
-    fallback:   'https://rss-mstdn.studiofreesia.com/@oricon_news.rss',
-  },
-
-  // TokyoHive — Korean+Japanese pop/idol news. 0 items in memory.
-  {
-    url:        'https://feeds.feedburner.com/tokyohive',
-    tags:       ['infotainment', 'anime'],
     confidence: 'unverified',
   },
 
-  // AmiAmi — anime figure/toy retailer feed. 0 items in memory; the English
-  // subdomain may not actually serve RSS.
-  {
-    url:        'https://www.amiami.com/eng/rss/newitem.xml',
-    tags:       ['toys'],
-    confidence: 'unverified',
-    fallback:   'https://hobby.dengeki.com/feed/',
-  },
-
-  // Toy People News — toys/figures news. 0 items in memory; legacy PHP RSS
-  // may have changed.
-  {
-    url:        'https://www.toy-people.com/rss.php',
-    tags:       ['toys'],
-    confidence: 'unverified',
-    fallback:   'https://hobby.dengeki.com/feed/',
-  },
+  // ─────────────────────────────────────────────────────────────────────────
+  //   REMOVED FEEDS (logged here for archeology — see commit history):
+  //
+  //   • natalie.mu/comic/feed  — primary 404, fallback redundant with
+  //                              chaosphere (which already aggregates
+  //                              natalie.mu/comic content)
+  //   • natalie.mu/anime/feed  — primary 404, fallback promoted above
+  //   • natalie.mu/game/feed   — primary 404, fallback promoted above
+  //   • natalie.mu/music/feed  — primary 404, fallback promoted above
+  //   • oricon.co.jp/rss/news/    — primary 403, fallback consolidated above
+  //   • oricon.co.jp/rss/music/   — primary 410 GONE, fallback consolidated
+  //   • oricon.co.jp/rss/movie/   — primary 410 GONE, fallback consolidated
+  //   • oricon.co.jp/rss/special/ — primary 410 GONE, fallback consolidated
+  //   • feeds.feedburner.com/tokyohive — broken XML (unescaped & at line 70),
+  //                                       no fallback, parser fails outright
+  //   • amiami.com/eng/rss/newitem.xml — primary 403, fallback was
+  //                                       hobby.dengeki.com (already a primary)
+  //   • toy-people.com/rss.php — primary 404, fallback was hobby.dengeki.com
+  //                              (already a primary, pure redundancy)
+  // ─────────────────────────────────────────────────────────────────────────
 ];
 
 /**
@@ -240,26 +214,32 @@ export const PRIORITY_FEEDS: FeedConfig[] = [
  */
 export const RSS_FEEDS: Record<Pillar, string[]> = {
   anime: [
-    'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) [anime] [manga] [gaming] [infotainment]
-    'https://www.animenewsnetwork.com/all/rss.xml?ann-edition=us', // ANN
+    'https://chaosphere.hostdon.jp/@natalie.rss',                        // Natalie via Mastodon proxy — manga 65%, anime 30%
+    'https://www.animenewsnetwork.com/all/rss.xml?ann-edition=us',       // ANN — anime 69%
+    'https://rss-mstdn.studiofreesia.com/@animeanime.rss',               // animeanime.jp via Mastodon proxy
   ],
   gaming: [
-    'https://automaton-media.com/feed/',                // Automaton               [gaming] [anime] [manga]
-    'https://www.4gamer.net/rss/index.xml',             // 4Gamer                  [gaming]
-    'https://news.denfaminicogamer.jp/feed',            // Denfami                 [gaming] [anime] [manga]
+    'https://www.4gamer.net/rss/index.xml',                              // 4Gamer — gaming 92%
+    'https://automaton-media.com/feed/',                                  // Automaton — gaming 100%
+    'https://news.denfaminicogamer.jp/feed',                              // Denfami — gaming 64% (most diverse)
+    'https://rss-mstdn.studiofreesia.com/@gamespark.rss',                 // gamespark.jp via Mastodon proxy
   ],
   infotainment: [
-    'https://essential-japan.com/feed/',                // Essential Japan         [infotainment]
-    'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) [infotainment] [anime] [manga]
+    'https://rss-mstdn.studiofreesia.com/@oricon_news.rss',               // oricon.co.jp via Mastodon proxy — primary infotainment source
+    'https://news.denfaminicogamer.jp/feed',                              // Denfami — info 5% (still measurable)
+    'https://chaosphere.hostdon.jp/@natalie.rss',                        // Natalie — info 4%
   ],
   manga: [
-    'https://automaton-media.com/feed/',                // Automaton               [gaming] [anime] [manga]
-    'https://chaosphere.hostdon.jp/@natalie.rss',       // Natalie (Mastodon proxy) [anime] [manga]
-    'https://news.denfaminicogamer.jp/feed',            // Denfami                 [gaming] [anime] [manga]
+    'https://chaosphere.hostdon.jp/@natalie.rss',                        // Natalie — manga 65% (best manga source)
+    'https://www.animenewsnetwork.com/all/rss.xml?ann-edition=us',       // ANN — manga 16%
+    'https://hobby.dengeki.com/feed/',                                    // Dengeki Hobby — manga 9%
+    'https://news.denfaminicogamer.jp/feed',                              // Denfami — manga 7%
   ],
   toys: [
-    'https://hobby.dengeki.com/feed/',                  // Dengeki Hobby           [toys] [anime]
-    'https://www.toy-people.com/rss.php',               // Toy People News         [toys]
+    'https://hobby.dengeki.com/feed/',                                    // Dengeki Hobby — toys 82% (best toys source)
+    'https://www.4gamer.net/rss/index.xml',                              // 4Gamer — toys 5% (game merch)
+    'https://news.denfaminicogamer.jp/feed',                              // Denfami — toys 11%
+    'https://rss-mstdn.studiofreesia.com/@animeanime.rss',               // animeanime.jp via proxy — figure crossovers
   ],
 };
 
