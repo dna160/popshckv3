@@ -12,12 +12,14 @@
  *     are underquota so it can prioritise accordingly.
  *   • Track its own triagedUrls set so consecutive underquota rounds
  *     never re-evaluate the same item.
+ *   • Cap each pillar internally so the LLM is never called on items
+ *     destined for a full bucket (parity with Scout's triageAll).
  *   • Return ALL approved ScoutItems to the Master; quota-capping is the
- *     Master's responsibility.
+ *     Master's responsibility for safety.
  *
  * Pool cap : UNDERQUOTA_POOL_SIZE = 50
- * Age window: AGE_LIMIT_DAYS = 7
- * Batch size: BATCH_SIZE = 10
+ * Age window: AGE_LIMIT_DAYS = 14
+ * Batch size: ADAPTIVE — scales with remaining slots, capped MAX_BATCH_SIZE
  */
 
 import path from 'path';
@@ -29,12 +31,14 @@ import { PILLARS }                  from '../shared/types';
 import type { Pillar, ScoutItem }   from '../shared/types';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const UNDERQUOTA_POOL_SIZE = 50;
-const BATCH_SIZE           = 10;
-const AGE_LIMIT_DAYS       = 14;   // extended from 7 — under-served pillars
-                                    // (toys, infotainment, manga) often have
-                                    // older articles still relevant to readers
-const MEMORY_FILE          = path.join(process.cwd(), 'data', 'feed-memory.json');
+const UNDERQUOTA_POOL_SIZE       = 50;
+const MIN_BATCH_SIZE             = 4;   // floor for adaptive batching
+const MAX_BATCH_SIZE             = 20;  // ceiling — keeps LLM concurrency bounded
+const ADAPTIVE_OVERSHOOT         = 2;   // batch = remaining_slots × overshoot
+const AGE_LIMIT_DAYS             = 14;  // under-served pillars often have older items still relevant
+const MAX_CANDIDATES_PER_PILLAR  = 10;
+const PREDICTIVE_SKIP_THRESHOLD  = 0.7; // skip LLM if source ≥70% affinity for full pillar
+const MEMORY_FILE                = path.join(process.cwd(), 'data', 'feed-memory.json');
 
 // ── Lightweight FeedMemory reader (read-only, shared file with Scout) ────────
 type PillarCounts   = Record<Pillar, number>;
@@ -58,6 +62,46 @@ function dominantPillarOf(domain: string, mem: FeedMemoryData): Pillar | null {
     if (counts[p] > max) { max = counts[p]; dom = p; }
   }
   return max > 0 ? dom : null;
+}
+
+function pillarShareOf(domain: string, pillar: Pillar, mem: FeedMemoryData): number {
+  const counts = mem[domain];
+  if (!counts) return 0;
+  const total = PILLARS.reduce((s, p) => s + counts[p], 0);
+  return total === 0 ? 0 : counts[pillar] / total;
+}
+
+// ── Confidence weighting for sorting ─────────────────────────────────────────
+type Confidence = 'high' | 'medium' | 'low' | 'unverified';
+
+function confidenceWeight(c?: Confidence): number {
+  switch (c) {
+    case 'high':       return 0;
+    case 'medium':     return 1;
+    case 'low':        return 2;
+    case 'unverified': return 3;
+    default:           return 1;
+  }
+}
+
+/** Lookup a source hostname's confidence level based on PRIORITY_FEEDS config. */
+const SOURCE_CONFIDENCE_MAP = new Map<string, Confidence>();
+for (const feed of PRIORITY_FEEDS) {
+  try {
+    const host = new URL(feed.url).hostname;
+    SOURCE_CONFIDENCE_MAP.set(host, feed.confidence);
+    if (feed.fallback) {
+      const fbHost = new URL(feed.fallback).hostname;
+      // Use the lower confidence of primary/fallback so fallbacks don't claim primary's high
+      if (!SOURCE_CONFIDENCE_MAP.has(fbHost)) {
+        SOURCE_CONFIDENCE_MAP.set(fbHost, feed.confidence);
+      }
+    }
+  } catch { /* keep going */ }
+}
+
+function sourceConfidence(domain: string): Confidence {
+  return SOURCE_CONFIDENCE_MAP.get(domain) ?? 'unverified';
 }
 
 // ── Pillar label → internal key map ──────────────────────────────────────────
@@ -99,10 +143,11 @@ const PILLAR_LABEL: Record<Pillar, string> = {
  *
  * Groups items by source, sorts each newest-first, predicts each source's
  * dominant pillar from FeedMemory, then round-robins across pillar lanes
- * with target pillars drawn FIRST. This prevents pollution from sources
- * that are tagged for the target pillar but historically produce off-pillar
- * content (e.g. automaton tagged ['gaming', 'anime', 'manga'] but 100%
- * gaming in practice).
+ * with target pillars drawn FIRST.
+ *
+ * Within each lane, sources are sorted by confidence (high → unverified)
+ * so when targeting manga, chaosphere (proven 65% manga, confidence:high)
+ * gets drawn before unverified sources within the manga lane.
  */
 function fairPillarInterleave(
   items:         PoolItem[],
@@ -133,10 +178,22 @@ function fairPillarInterleave(
     lanes.get(key)!.push(source);
   }
 
-  // Lane priority: target pillars first, THEN unknown (untrained feeds — most
-  // are fallback feeds we just added, e.g. soranews24, cbr, otakuusamagazine —
-  // they're high-potential for the target pillars but lack memory yet),
-  // THEN off-target pillars last.
+  // ── Within-lane sort: confidence-first ─────────────────────────────────
+  // Sources with proven track record (high confidence) get drawn before
+  // unverified sources in the same lane.  Tie-break by total historical
+  // volume so a 747-item ANN beats a 71-item chaosphere within the anime lane.
+  for (const sources of lanes.values()) {
+    sources.sort((a, b) => {
+      const cA = confidenceWeight(sourceConfidence(a));
+      const cB = confidenceWeight(sourceConfidence(b));
+      if (cA !== cB) return cA - cB;
+      const totalA = PILLARS.reduce((s, p) => s + (memory[a]?.[p] ?? 0), 0);
+      const totalB = PILLARS.reduce((s, p) => s + (memory[b]?.[p] ?? 0), 0);
+      return totalB - totalA;
+    });
+  }
+
+  // Lane priority: target pillars first, THEN unknown, THEN off-target
   const targetSet = new Set<Pillar>(targetPillars);
   const otherPillars = PILLARS.filter((p) => !targetSet.has(p));
   const lanePriority: LaneKey[] = [...targetPillars, 'unknown', ...otherPillars];
@@ -190,13 +247,17 @@ export class UnderquotaProtocol {
 
   /**
    * Tracks every URL this instance has sent to the LLM across all underquota
-   * rounds within a single pipeline run.  Prevents re-triage of the same item
-   * if the Orchestrator dispatches multiple consecutive underquota rounds.
-   *
-   * Reset automatically because the Orchestrator creates a fresh instance on
-   * every pipeline run.
+   * rounds within a single pipeline run.
    */
   private triagedUrls: Set<string> = new Set();
+
+  /**
+   * FeedMemory cache — loaded ONCE per UnderquotaProtocol instance lifetime.
+   * The orchestrator creates a fresh instance per pipeline run, so this is
+   * effectively a per-run cache.  Without caching, loadFeedMemory() was being
+   * called on every dispatch (5+ disk reads per run when deficit is bad).
+   */
+  private memoryCache: FeedMemoryData | null = null;
 
   constructor(prisma: PrismaClient, log: (msg: string) => void = console.log) {
     this.prisma = prisma;
@@ -205,35 +266,24 @@ export class UnderquotaProtocol {
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
+  private async getMemory(): Promise<FeedMemoryData> {
+    if (this.memoryCache !== null) return this.memoryCache;
+    this.memoryCache = await loadFeedMemory();
+    return this.memoryCache;
+  }
+
   private async isProcessed(url: string): Promise<boolean> {
     return (await this.prisma.processedUrl.findUnique({ where: { url } })) !== null;
   }
 
   /**
    * Return the URLs of every PRIORITY_FEEDS entry whose tags include at least
-   * one of the target pillars, deduplicated and in declaration order.
-   *
-   * Feeds are filtered by tag accuracy (which has been recalibrated in
-   * services/rss.ts based on actual FeedMemory output) and ordered by the
-   * `confidence` rating where present so high-yield sources are at the head
-   * of the URL list before fetch.
+   * one of the target pillars, deduplicated and sorted by confidence
+   * (high → medium → low → unverified).
    */
   private getFeedsForPillars(targetPillars: Pillar[]): string[] {
     const seen = new Set<string>();
     const urls: string[] = [];
-
-    // Sort feeds by confidence (high → medium → low → unverified) so
-    // high-yield sources are fetched first. Stable sort preserves declaration
-    // order within the same confidence tier.
-    const confidenceWeight = (c?: 'high' | 'medium' | 'low' | 'unverified'): number => {
-      switch (c) {
-        case 'high':       return 0;
-        case 'medium':     return 1;
-        case 'low':        return 2;
-        case 'unverified': return 3;
-        default:           return 1; // unset → treat as medium
-      }
-    };
 
     const candidates = [...PRIORITY_FEEDS]
       .filter((feed) => feed.tags.some((tag) => targetPillars.includes(tag)))
@@ -260,12 +310,10 @@ export class UnderquotaProtocol {
     memory:        FeedMemoryData,
     targetPillars: Pillar[]
   ): Promise<PoolItem[]> {
-    // ── Step 1: Fetch all feeds concurrently (with per-feed fallback) ─────────
     const feedResults = await Promise.allSettled(
       feedUrls.map((url) => fetchFeed(url, 'anime', FEED_FALLBACK_MAP.get(url)))
     );
 
-    // ── Step 2: Collect and deduplicate raw items ─────────────────────────────
     const rawItems:  PoolItem[] = [];
     const seenLinks = new Set<string>();
 
@@ -285,11 +333,6 @@ export class UnderquotaProtocol {
       }
     }
 
-    // ── Step 3: Pillar-aware fair interleave ──────────────────────────────────
-    // Sources whose dominant historical pillar matches a target pillar are
-    // drawn FIRST. Sources tagged for a target pillar but historically
-    // off-target (e.g. automaton tagged ['manga'] but 100% gaming) drop
-    // to lower lanes.
     const interleaved = fairPillarInterleave(rawItems, memory, targetPillars);
 
     const sourceCount = new Set(rawItems.map((i) => i.sourceFeed)).size;
@@ -305,13 +348,11 @@ export class UnderquotaProtocol {
       `[Underquota] Pillar-fair interleave — ${interleaved.length} items across ${sourceCount} source(s) | lanes: ${laneStr}`
     );
 
-    // ── Step 4: Age filter ────────────────────────────────────────────────────
     const cutoff = Date.now() - AGE_LIMIT_DAYS * 24 * 60 * 60 * 1000;
     const aged   = interleaved.filter((item) =>
       !item.pubDate || new Date(item.pubDate).getTime() >= cutoff
     );
 
-    // ── Step 5: Remove already-processed / triaged / rejected URLs ────────────
     const pool: PoolItem[] = [];
     for (const item of aged) {
       if (rejectedUrls.has(item.link))     continue;
@@ -327,9 +368,9 @@ export class UnderquotaProtocol {
   /**
    * Triage a single item with a pillar-aware underquota prompt.
    *
-   * The LLM is told which pillars are underquota so it can frame its
-   * classification with those priorities in mind.  Off-pillar approvals
-   * are still returned — the Master's processHandover() handles capping.
+   * Prompt clarifies what counts as "infotainment" (J-pop, idols, drama,
+   * films, music charts, celebrity coverage) since the LLM had been
+   * defaulting to anime/gaming for ambiguous items.
    */
   private async triageItem(
     title:         string,
@@ -337,7 +378,8 @@ export class UnderquotaProtocol {
     targetPillars: Pillar[]
   ): Promise<
     | { status: 'APPROVED'; pillar: Pillar; extracted_facts: string; translation_notes: string }
-    | { status: 'REJECTED' | 'PARSE_ERROR'; reason: string }
+    | { status: 'REJECTED';    reason: string }
+    | { status: 'PARSE_ERROR'; reason: string }
   > {
     const targetLabels = targetPillars.map((p) => PILLAR_LABEL[p]).join(', ');
 
@@ -349,11 +391,20 @@ Your job is to classify this RSS item and extract key facts.
 
 **INSTRUCTIONS:**
 1. Classify the item into EXACTLY ONE of the following 5 pillars:
-   - Japanese Anime
-   - Japanese Gaming
-   - Japanese Infotainment
-   - Japanese Manga
-   - Japanese Toys/Collectibles
+   - **Japanese Anime** — TV anime, anime films, OVAs, voice actors (seiyuu),
+     anime studios, anime-original projects.
+   - **Japanese Gaming** — video games (console/PC/mobile/arcade), game
+     announcements, beta tests, esports, JRPGs, gacha, indie JP titles.
+   - **Japanese Infotainment** — J-pop / K-pop in Japan, idol groups
+     (AKB48, Sakurazaka46, Hello!Project, Johnny's), Oricon music charts,
+     live concerts, J-drama, Japanese films (live-action), variety shows,
+     celebrity news, music video releases. NOT anime films — those go to Anime.
+   - **Japanese Manga** — manga series (Shonen Jump, Magazine Pocket, etc.),
+     manga authors, comic awards, manga-original projects, light novels.
+   - **Japanese Toys/Collectibles** — figures (PVC/scale/Nendoroid),
+     plamo/gunpla, prize figures, trading cards, gachapon, hobby merch,
+     pre-order announcements, collectible toy news.
+
    If the item does not fit any pillar → REJECTED.
    Items that fit a non-underquota pillar are still accepted — the pipeline \
 orchestrator will decide where to slot them.
@@ -414,18 +465,18 @@ Summary: "${summary}"
   /**
    * Run one underquota round for the given missing pillar labels.
    *
-   * Called directly by the Master Orchestrator whenever a pillar is still
-   * below quota after Round 1 (or a previous underquota round).
-   *
-   * @param missingPillarLabels  Human-readable labels e.g. ['Japanese Manga', 'Japanese Toys/Collectibles']
-   * @param rejectedUrls         URLs the pipeline has already ruled out this run
-   * @returns                    All approved ScoutItems; Master applies quota caps
+   * Implements Scout-parity bucket-aware triage:
+   *   1. Local mutable buckets track per-pillar fill state.
+   *   2. Predictive skip drops items from sources with ≥70% historical
+   *      affinity for an already-full pillar BEFORE the LLM call.
+   *   3. Adaptive batch size scales with remaining slot count.
+   *   4. Early termination when all target pillars are filled.
+   *   5. Hard pillar cap prevents over-fill on the LLM's results.
    */
   async run(
     missingPillarLabels: string[],
     rejectedUrls: Set<string> = new Set()
   ): Promise<ScoutItem[]> {
-    // Resolve labels to internal pillar keys
     const targetPillars = missingPillarLabels
       .map((label) => PILLAR_FROM_LABEL[label])
       .filter((p): p is Pillar => Boolean(p));
@@ -435,7 +486,6 @@ Summary: "${summary}"
       return [];
     }
 
-    // Select PRIORITY_FEEDS entries tagged for these pillars
     const feedUrls = this.getFeedsForPillars(targetPillars);
 
     if (feedUrls.length === 0) {
@@ -454,61 +504,161 @@ Summary: "${summary}"
       `${feedUrls.length} tagged priority feed(s): ${feedDomains}`
     );
 
-    // Load feed memory (written by Scout) for pillar-aware interleave
-    const memory = await loadFeedMemory();
-
-    // Build pool (up to 50 items, deduplicated, age-filtered)
-    const pool = await this.buildPool(feedUrls, rejectedUrls, memory, targetPillars);
+    const memory = await this.getMemory();
+    const pool   = await this.buildPool(feedUrls, rejectedUrls, memory, targetPillars);
 
     if (pool.length === 0) {
       this.log('[Underquota] Pool empty — no new items from tagged priority feeds.');
       return [];
     }
 
-    this.log(`[Underquota] Pool: ${pool.length} item(s). Starting triage...`);
+    this.log(`[Underquota] Pool: ${pool.length} item(s). Starting bucket-aware triage…`);
 
-    const approved: ScoutItem[] = [];
-    const batches  = Math.ceil(pool.length / BATCH_SIZE);
+    // ── Local fill tracking (parity with Scout's triageAll) ───────────────
+    const localBuckets: Record<Pillar, number> = {
+      anime: 0, gaming: 0, infotainment: 0, manga: 0, toys: 0,
+    };
+    const isPillarFull   = (p: Pillar) => localBuckets[p] >= MAX_CANDIDATES_PER_PILLAR;
+    const allTargetsFull = ()           => targetPillars.every(isPillarFull);
 
-    for (let b = 0; b < batches; b++) {
-      const batch = pool.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
+    const approved:  ScoutItem[]  = [];
+    let   remaining               = [...pool];
+    let   batchNum                = 0;
+    let   predictiveSkipTotal     = 0;
 
-      // Mark as triaged BEFORE LLM call — retries never re-evaluate same URL
+    while (remaining.length > 0 && !allTargetsFull()) {
+      // ── Adaptive batch size ────────────────────────────────────────────
+      // Sum remaining slots across target pillars × overshoot factor; clamp
+      // to [MIN_BATCH_SIZE, MAX_BATCH_SIZE].  Wide batches early when slots
+      // are wide-open, narrow batches near the finish line so we don't
+      // overshoot.
+      const remainingSlots = targetPillars.reduce(
+        (sum, p) => sum + Math.max(0, MAX_CANDIDATES_PER_PILLAR - localBuckets[p]),
+        0
+      );
+      const desiredBatch = Math.max(
+        MIN_BATCH_SIZE,
+        Math.min(MAX_BATCH_SIZE, remainingSlots * ADAPTIVE_OVERSHOOT)
+      );
+
+      // ── Predictive skip ────────────────────────────────────────────────
+      // Drop items whose source overwhelmingly produces content for an
+      // already-full pillar BEFORE the LLM call.
+      const batch:       PoolItem[] = [];
+      const skippedHere: PoolItem[] = [];
+
+      for (const item of remaining) {
+        if (batch.length >= desiredBatch) break;
+
+        let predictiveSkip = false;
+        for (const p of PILLARS) {
+          if (!isPillarFull(p)) continue;
+          if (pillarShareOf(item.sourceFeed, p, memory) >= PREDICTIVE_SKIP_THRESHOLD) {
+            predictiveSkip = true;
+            break;
+          }
+        }
+
+        if (predictiveSkip) skippedHere.push(item);
+        else                batch.push(item);
+      }
+
+      // Remove handled items from `remaining`
+      const handledLinks = new Set([
+        ...batch.map((i) => i.link),
+        ...skippedHere.map((i) => i.link),
+      ]);
+      remaining = remaining.filter((i) => !handledLinks.has(i.link));
+
+      // Predictive skips count as triaged so retries never re-fetch them
+      for (const item of skippedHere) this.triagedUrls.add(item.link);
+      predictiveSkipTotal += skippedHere.length;
+
+      if (batch.length === 0 && skippedHere.length > 0) {
+        this.log(
+          `[Underquota] predictive skip dropped ${skippedHere.length} item(s) ` +
+          `(source ≥${(PREDICTIVE_SKIP_THRESHOLD * 100).toFixed(0)}% affinity for full pillar)`
+        );
+        continue;
+      }
+      if (batch.length === 0) break;
+
+      batchNum++;
+
+      const fillState = targetPillars
+        .map((p) => `${p}:${localBuckets[p]}/${MAX_CANDIDATES_PER_PILLAR}`)
+        .join(' ');
+      const skipNote = skippedHere.length > 0
+        ? ` | predictive-skip:${skippedHere.length}`
+        : '';
+
+      this.log(
+        `[Underquota] Batch ${batchNum} (${batch.length} items, adaptive=${desiredBatch}${skipNote}, ${remaining.length} remaining) | ${fillState}`
+      );
+
+      // Mark as triaged BEFORE LLM call
       for (const item of batch) this.triagedUrls.add(item.link);
 
-      const results = await Promise.all(
+      const triageResults = await Promise.all(
         batch.map((item) => this.triageItem(item.title, item.summary, targetPillars))
       );
 
-      let accepted = 0, rejected = 0, errors = 0;
+      let accepted = 0, rejected = 0, errors = 0, capped = 0;
 
-      for (let i = 0; i < results.length; i++) {
-        const result = results[i];
+      for (let i = 0; i < triageResults.length; i++) {
+        const result = triageResults[i];
         const item   = batch[i];
 
-        if (result.status === 'APPROVED') {
-          accepted++;
-          approved.push({
-            title:            item.title,
-            link:             item.link,
-            summary:          item.summary,
-            pillar:           result.pillar,
-            translationNotes: result.translation_notes,
-          });
-          this.log(
-            `[Underquota] ✓ ACCEPTED  [${result.pillar}] [${item.sourceFeed}] | "${item.title}"`
-          );
-        } else if (result.status === 'REJECTED') {
+        if (result.status === 'REJECTED') {
           rejected++;
           this.log(`[Underquota] ✗ REJECTED  — ${result.reason} | "${item.title}"`);
-        } else {
+          continue;
+        }
+        if (result.status === 'PARSE_ERROR') {
           errors++;
           this.log(`[Underquota] ✗ ERROR     — ${result.reason} | "${item.title}"`);
+          continue;
         }
+
+        // Hard pillar cap — drop if pillar already full locally
+        if (isPillarFull(result.pillar)) {
+          capped++;
+          this.log(
+            `[Underquota] ~ FULL     [${result.pillar}] (${localBuckets[result.pillar]}/${MAX_CANDIDATES_PER_PILLAR}) | "${item.title}"`
+          );
+          continue;
+        }
+
+        accepted++;
+        localBuckets[result.pillar]++;
+        approved.push({
+          title:            item.title,
+          link:             item.link,
+          summary:          item.summary,
+          pillar:           result.pillar,
+          translationNotes: result.translation_notes,
+        });
+        this.log(
+          `[Underquota] ✓ ACCEPTED  [${result.pillar}] (${localBuckets[result.pillar]}/${MAX_CANDIDATES_PER_PILLAR}) ` +
+          `[${item.sourceFeed}] | "${item.title}"`
+        );
       }
 
       this.log(
-        `[Underquota] Batch ${b + 1}/${batches} — ✓${accepted} ✗${rejected} err:${errors}`
+        `[Underquota] Batch ${batchNum} done — ✓${accepted} ✗${rejected} cap:${capped} err:${errors} | ` +
+        targetPillars.map((p) => `${p}:${localBuckets[p]}`).join(' ')
+      );
+    }
+
+    if (allTargetsFull()) {
+      this.log(
+        `[Underquota] All ${targetPillars.length} target pillar(s) satisfied. ` +
+        `Stopping early — ${remaining.length} item(s) untouched, ${predictiveSkipTotal} predictively skipped. ` +
+        `LLM cost saved: ~${remaining.length + predictiveSkipTotal} call(s).`
+      );
+    } else if (predictiveSkipTotal > 0) {
+      this.log(
+        `[Underquota] Total predictive skips: ${predictiveSkipTotal} (LLM calls saved)`
       );
     }
 

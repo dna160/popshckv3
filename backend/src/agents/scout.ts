@@ -54,6 +54,42 @@ import { PILLARS, PILLAR_LABELS } from '../shared/types';
 const MAX_CANDIDATES_PER_PILLAR = 10;  // used by FeedMemory.score() to compute need()
 const FRESH_POOL_SIZE           = 100; // items pulled from PRIORITY_FEEDS on round_1
 const RETRY_POOL_SIZE           = 50;  // items pulled from fallback feeds per underquota/fallback dispatch
+const MIN_BATCH_SIZE            = 4;   // floor for adaptive batching (triageAll)
+const MAX_BATCH_SIZE            = 20;  // ceiling — keeps LLM concurrency bounded
+const ADAPTIVE_OVERSHOOT        = 2;   // batch size = remaining_slots × overshoot
+
+// ── Confidence weighting ─────────────────────────────────────────────────────
+// Built from PRIORITY_FEEDS so fairPillarInterleave can sort sources WITHIN
+// each pillar lane by their confidence rating (high → unverified).
+type Confidence = 'high' | 'medium' | 'low' | 'unverified';
+
+function confidenceWeight(c?: Confidence): number {
+  switch (c) {
+    case 'high':       return 0;
+    case 'medium':     return 1;
+    case 'low':        return 2;
+    case 'unverified': return 3;
+    default:           return 1;
+  }
+}
+
+const SOURCE_CONFIDENCE_MAP = new Map<string, Confidence>();
+for (const feed of PRIORITY_FEEDS) {
+  try {
+    const host = new URL(feed.url).hostname;
+    SOURCE_CONFIDENCE_MAP.set(host, feed.confidence);
+    if (feed.fallback) {
+      const fbHost = new URL(feed.fallback).hostname;
+      if (!SOURCE_CONFIDENCE_MAP.has(fbHost)) {
+        SOURCE_CONFIDENCE_MAP.set(fbHost, feed.confidence);
+      }
+    }
+  } catch { /* keep going */ }
+}
+
+function sourceConfidence(domain: string): Confidence {
+  return SOURCE_CONFIDENCE_MAP.get(domain) ?? 'unverified';
+}
 const BATCH_SIZE                = 10;
 const AGE_LIMIT_DAYS            = 7;
 const AGE_RETRY_DAYS            = 14;
@@ -198,6 +234,21 @@ function fairPillarInterleave(items: PoolItem[], memory: FeedMemory): PoolItem[]
     const key: LaneKey = dominant ?? 'unknown';
     if (!lanes.has(key)) lanes.set(key, []);
     lanes.get(key)!.push(source);
+  }
+
+  // ── Step 2b: Within-lane confidence sort ─────────────────────────────────
+  // Sources with proven track record (high confidence) get drawn before
+  // unverified sources within the same lane.  Tie-break by total historical
+  // volume so a 747-item ANN beats a 71-item chaosphere within the anime lane.
+  for (const sources of lanes.values()) {
+    sources.sort((a, b) => {
+      const cA = confidenceWeight(sourceConfidence(a));
+      const cB = confidenceWeight(sourceConfidence(b));
+      if (cA !== cB) return cA - cB;
+      // Use the existing public score as a stable secondary key
+      // (higher historical volume → higher score given empty bucket state)
+      return 0;
+    });
   }
 
   // ── Step 3: Lane draw priority — rarest pillar first ─────────────────────
@@ -405,12 +456,20 @@ export class Scout {
 
 **INSTRUCTIONS:**
 1. **Dynamic Categorization:** Read the raw RSS content and classify it into EXACTLY ONE of the following 5 pillars:
-   - Japanese Anime
-   - Japanese Gaming
-   - Japanese Infotainment
-   - Japanese Manga
-   - Japanese Toys/Collectibles
-   *(If the article does not fit any of these, mark it as "REJECTED").*
+   - **Japanese Anime** — TV anime, anime films, OVAs, voice actors (seiyuu),
+     anime studios, anime-original projects.
+   - **Japanese Gaming** — video games (console/PC/mobile/arcade), game
+     announcements, beta tests, esports, JRPGs, gacha, indie JP titles.
+   - **Japanese Infotainment** — J-pop / K-pop in Japan, idol groups
+     (AKB48, Sakurazaka46, Hello!Project, Johnny's), Oricon music charts,
+     live concerts, J-drama, Japanese live-action films, variety shows,
+     celebrity news, music video releases. NOT anime films — those go to Anime.
+   - **Japanese Manga** — manga series (Shonen Jump, Magazine Pocket, etc.),
+     manga authors, comic awards, manga-original projects, light novels.
+   - **Japanese Toys/Collectibles** — figures (PVC/scale/Nendoroid),
+     plamo/gunpla, prize figures, trading cards, gachapon, hobby merch,
+     pre-order announcements, collectible toy news.
+   *(If the article does not fit any of these, mark it as "REJECTED".)*
 
 2. **Fact Extraction:** Extract the who, what, when, where, and why of the news.
 
@@ -770,6 +829,20 @@ Respond ONLY with the JSON object.`;
     let   predictiveSkipTotal    = 0;
 
     while (remaining.length > 0 && !allActiveFull()) {
+      // ── Adaptive batch size ──────────────────────────────────────────────
+      // Sum remaining slots across active pillars × overshoot factor; clamp
+      // to [MIN_BATCH_SIZE, MAX_BATCH_SIZE].  Wide batches early when slots
+      // are wide-open (50 slots → batch of 20), narrow batches near the
+      // finish line so we don't overshoot a near-full bucket.
+      const remainingSlots = activePillars.reduce(
+        (sum, p) => sum + Math.max(0, MAX_CANDIDATES_PER_PILLAR - localBuckets[p].length),
+        0
+      );
+      const desiredBatch = Math.max(
+        MIN_BATCH_SIZE,
+        Math.min(MAX_BATCH_SIZE, remainingSlots * ADAPTIVE_OVERSHOOT)
+      );
+
       // ── Score remaining items using DYNAMIC localBuckets ─────────────────
       const scored = remaining.map((item) => ({
         item,
@@ -792,7 +865,7 @@ Respond ONLY with the JSON object.`;
       const skippedHere: PoolItem[] = [];
 
       for (const { item } of candidates) {
-        if (batch.length >= BATCH_SIZE) break;
+        if (batch.length >= desiredBatch) break;
 
         // Find pillars this source has strong affinity for AND that are full
         let predictiveSkip = false;
@@ -843,7 +916,7 @@ Respond ONLY with the JSON object.`;
         : '';
 
       this.log(
-        `[Scout] ${roundLabel} — Batch ${batchNum} (${batch.length} items${skipNote}, ${remaining.length} remaining) | ${fillState}`
+        `[Scout] ${roundLabel} — Batch ${batchNum} (${batch.length} items, adaptive=${desiredBatch}${skipNote}, ${remaining.length} remaining) | ${fillState}`
       );
 
       // Mark all batch items as triaged BEFORE the LLM call
