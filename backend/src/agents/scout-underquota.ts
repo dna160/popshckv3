@@ -20,15 +20,43 @@
  * Batch size: BATCH_SIZE = 10
  */
 
+import path from 'path';
+import fs   from 'fs/promises';
 import { PrismaClient }            from '@prisma/client';
 import { fetchFeed, PRIORITY_FEEDS, FEED_FALLBACK_MAP } from '../services/rss';
 import { chat, parseJsonResponse }  from '../services/llm';
+import { PILLARS }                  from '../shared/types';
 import type { Pillar, ScoutItem }   from '../shared/types';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const UNDERQUOTA_POOL_SIZE = 50;
 const BATCH_SIZE           = 10;
 const AGE_LIMIT_DAYS       = 7;
+const MEMORY_FILE          = path.join(process.cwd(), 'data', 'feed-memory.json');
+
+// ── Lightweight FeedMemory reader (read-only, shared file with Scout) ────────
+type PillarCounts   = Record<Pillar, number>;
+type FeedMemoryData = Record<string, PillarCounts>;
+
+async function loadFeedMemory(): Promise<FeedMemoryData> {
+  try {
+    const raw = await fs.readFile(MEMORY_FILE, 'utf-8');
+    return JSON.parse(raw) as FeedMemoryData;
+  } catch {
+    return {};
+  }
+}
+
+function dominantPillarOf(domain: string, mem: FeedMemoryData): Pillar | null {
+  const counts = mem[domain];
+  if (!counts) return null;
+  let max = 0;
+  let dom: Pillar | null = null;
+  for (const p of PILLARS) {
+    if (counts[p] > max) { max = counts[p]; dom = p; }
+  }
+  return max > 0 ? dom : null;
+}
 
 // ── Pillar label → internal key map ──────────────────────────────────────────
 const PILLAR_FROM_LABEL: Record<string, Pillar> = {
@@ -65,42 +93,77 @@ const PILLAR_LABEL: Record<Pillar, string> = {
 };
 
 /**
- * Fair-Source Interleave Algorithm
+ * Pillar-Aware Fair Interleave (Underquota Variant)
  *
- * Groups items by source, sorts each bucket newest-first, then draws
- * one item from each source in a round-robin fashion until all buckets
- * are exhausted. Guarantees the first N items in the result represent
- * N different publishers — no hard caps, no artificial limits.
+ * Groups items by source, sorts each newest-first, predicts each source's
+ * dominant pillar from FeedMemory, then round-robins across pillar lanes
+ * with target pillars drawn FIRST. This prevents pollution from sources
+ * that are tagged for the target pillar but historically produce off-pillar
+ * content (e.g. automaton tagged ['gaming', 'anime', 'manga'] but 100%
+ * gaming in practice).
  */
-function fairSourceInterleave(items: PoolItem[]): PoolItem[] {
-  const buckets = new Map<string, PoolItem[]>();
+function fairPillarInterleave(
+  items:         PoolItem[],
+  memory:        FeedMemoryData,
+  targetPillars: Pillar[]
+): PoolItem[] {
+  // Group by source, sort newest-first
+  const bySource = new Map<string, PoolItem[]>();
   for (const item of items) {
-    if (!buckets.has(item.sourceFeed)) buckets.set(item.sourceFeed, []);
-    buckets.get(item.sourceFeed)!.push(item);
+    if (!bySource.has(item.sourceFeed)) bySource.set(item.sourceFeed, []);
+    bySource.get(item.sourceFeed)!.push(item);
   }
-
-  for (const bucket of buckets.values()) {
-    bucket.sort((a, b) => {
+  for (const list of bySource.values()) {
+    list.sort((a, b) => {
       const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
       const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
       return tb - ta;
     });
   }
 
-  const result:   PoolItem[]   = [];
-  const sources:  PoolItem[][] = [...buckets.values()];
-  let drawIndex   = 0;
-  let keepDrawing = true;
+  // Group sources by their dominant historical pillar
+  type LaneKey = Pillar | 'unknown';
+  const lanes = new Map<LaneKey, string[]>();
+  for (const source of bySource.keys()) {
+    const dominant = dominantPillarOf(source, memory);
+    const key: LaneKey = dominant ?? 'unknown';
+    if (!lanes.has(key)) lanes.set(key, []);
+    lanes.get(key)!.push(source);
+  }
 
-  while (keepDrawing) {
-    keepDrawing = false;
-    for (const bucket of sources) {
-      if (drawIndex < bucket.length) {
-        result.push(bucket[drawIndex]);
-        keepDrawing = true;
+  // Lane priority: target pillars first (in given order), then everything else
+  const targetSet = new Set<Pillar>(targetPillars);
+  const otherPillars = PILLARS.filter((p) => !targetSet.has(p));
+  const lanePriority: LaneKey[] = [...targetPillars, ...otherPillars, 'unknown'];
+
+  // Round-robin across lanes, then sources within each lane
+  const result: PoolItem[] = [];
+  const sourceCursor = new Map<LaneKey, number>();
+
+  let progress = true;
+  while (progress) {
+    progress = false;
+    for (const lane of lanePriority) {
+      const sources = lanes.get(lane);
+      if (!sources || sources.length === 0) continue;
+
+      const start = sourceCursor.get(lane) ?? 0;
+      let attempted = 0;
+      let found = false;
+
+      while (attempted < sources.length && !found) {
+        const idx    = (start + attempted) % sources.length;
+        const source = sources[idx];
+        const bucket = bySource.get(source);
+        if (bucket && bucket.length > 0) {
+          result.push(bucket.shift()!);
+          sourceCursor.set(lane, (idx + 1) % sources.length);
+          found = true;
+          progress = true;
+        }
+        attempted++;
       }
     }
-    drawIndex++;
   }
 
   return result;
@@ -164,11 +227,13 @@ export class UnderquotaProtocol {
   /**
    * Fetch `feedUrls`, deduplicate, age-filter, skip already-processed /
    * already-triaged URLs, and return up to UNDERQUOTA_POOL_SIZE candidates
-   * ordered by the Fair-Source Interleave algorithm.
+   * ordered by the pillar-aware fair interleave algorithm.
    */
   private async buildPool(
-    feedUrls:     string[],
-    rejectedUrls: Set<string>
+    feedUrls:      string[],
+    rejectedUrls:  Set<string>,
+    memory:        FeedMemoryData,
+    targetPillars: Pillar[]
   ): Promise<PoolItem[]> {
     // ── Step 1: Fetch all feeds concurrently (with per-feed fallback) ─────────
     const feedResults = await Promise.allSettled(
@@ -195,12 +260,24 @@ export class UnderquotaProtocol {
       }
     }
 
-    // ── Step 3: Fair-source interleave ────────────────────────────────────────
-    const interleaved = fairSourceInterleave(rawItems);
+    // ── Step 3: Pillar-aware fair interleave ──────────────────────────────────
+    // Sources whose dominant historical pillar matches a target pillar are
+    // drawn FIRST. Sources tagged for a target pillar but historically
+    // off-target (e.g. automaton tagged ['manga'] but 100% gaming) drop
+    // to lower lanes.
+    const interleaved = fairPillarInterleave(rawItems, memory, targetPillars);
 
     const sourceCount = new Set(rawItems.map((i) => i.sourceFeed)).size;
+    const laneSummary = new Map<string, number>();
+    for (const it of rawItems) {
+      const lane = dominantPillarOf(it.sourceFeed, memory) ?? 'unknown';
+      laneSummary.set(lane, (laneSummary.get(lane) ?? 0) + 1);
+    }
+    const laneStr = [...laneSummary.entries()]
+      .map(([lane, n]) => `${lane}:${n}`)
+      .join('  ');
     this.log(
-      `[Underquota] Fair-source interleave — ${interleaved.length} items across ${sourceCount} source(s)`
+      `[Underquota] Pillar-fair interleave — ${interleaved.length} items across ${sourceCount} source(s) | lanes: ${laneStr}`
     );
 
     // ── Step 4: Age filter ────────────────────────────────────────────────────
@@ -352,8 +429,11 @@ Summary: "${summary}"
       `${feedUrls.length} tagged priority feed(s): ${feedDomains}`
     );
 
+    // Load feed memory (written by Scout) for pillar-aware interleave
+    const memory = await loadFeedMemory();
+
     // Build pool (up to 50 items, deduplicated, age-filtered)
-    const pool = await this.buildPool(feedUrls, rejectedUrls);
+    const pool = await this.buildPool(feedUrls, rejectedUrls, memory, targetPillars);
 
     if (pool.length === 0) {
       this.log('[Underquota] Pool empty — no new items from tagged priority feeds.');

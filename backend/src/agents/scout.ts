@@ -149,52 +149,93 @@ function shuffle<T>(arr: T[]): T[] {
 }
 
 /**
- * Fair-Source Interleave Algorithm
+ * Pillar-Aware Fair Interleave
  *
- * Solves feed dominance without hard per-source caps:
- *   1. Groups all items by source feed (hostname).
- *   2. Sorts each source's bucket newest-first.
- *   3. Round-robin draw — takes the single freshest article from each source
- *      in turn, loops back for the second freshest, and so on.
- *   4. Depleted sources are skipped naturally; the loop ends when all buckets
- *      are exhausted.
+ * Source-fair interleaving alone fails when feeds are pillar-imbalanced:
+ * 4 gaming-heavy feeds + 0 infotainment-heavy feeds means even perfect
+ * source rotation produces a gaming-dominated pool.
  *
- * Result: the first N items in the returned array are guaranteed to contain
- * one article from each of the N active sources, so the first LLM triage
- * batch always sees maximum publisher diversity.
+ * Algorithm:
+ *   1. Group items by source feed, sort each newest-first.
+ *   2. Predict each source's dominant pillar using FeedMemory history
+ *      (sources with no history go into the 'unknown' lane).
+ *   3. Group sources into one lane per predicted pillar.
+ *   4. Round-robin draw across PILLAR LANES, with rare-pillar lanes
+ *      drawn FIRST so toys/manga/infotainment get head-of-pool
+ *      placement before the high-volume gaming/anime tail.
+ *   5. Within each lane, round-robin across the sources in that lane.
+ *   6. Empty lanes are skipped — the loop ends when every lane is dry.
+ *
+ * Effect: the first 5–6 items of the returned pool span 5 different
+ * predicted pillars, so the first LLM batch always sees pillar diversity
+ * rather than 4Gamer × 3 + Automaton × 3 + Denfami × 3.
+ *
+ * `lanePriority` orders the lanes from rarest → most-common pillar so
+ * scarce-pillar items get processed first while their buckets are empty.
  */
-function fairSourceInterleave(items: PoolItem[]): PoolItem[] {
-  // Group by sourceFeed (already set to hostname by fetchFeed)
-  const buckets = new Map<string, PoolItem[]>();
+function fairPillarInterleave(items: PoolItem[], memory: FeedMemory): PoolItem[] {
+  // ── Step 1: Group items by source, sort each newest-first ────────────────
+  const bySource = new Map<string, PoolItem[]>();
   for (const item of items) {
-    if (!buckets.has(item.sourceFeed)) buckets.set(item.sourceFeed, []);
-    buckets.get(item.sourceFeed)!.push(item);
+    if (!bySource.has(item.sourceFeed)) bySource.set(item.sourceFeed, []);
+    bySource.get(item.sourceFeed)!.push(item);
   }
-
-  // Sort each bucket newest-first
-  for (const bucket of buckets.values()) {
-    bucket.sort((a, b) => {
+  for (const list of bySource.values()) {
+    list.sort((a, b) => {
       const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
       const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
       return tb - ta;
     });
   }
 
-  // Round-robin draw across all source buckets
-  const result:  PoolItem[]   = [];
-  const sources: PoolItem[][] = [...buckets.values()];
-  let drawIndex  = 0;
-  let keepDrawing = true;
+  // ── Step 2: Group sources into pillar lanes by their dominant history ────
+  // Lane keys are 'anime' | 'gaming' | 'infotainment' | 'manga' | 'toys' | 'unknown'.
+  // Sources with no history land in 'unknown' (treated as last-priority).
+  type LaneKey = Pillar | 'unknown';
+  const lanes = new Map<LaneKey, string[]>();
+  for (const source of bySource.keys()) {
+    const dominant = memory.dominantPillar(source);
+    const key: LaneKey = dominant ?? 'unknown';
+    if (!lanes.has(key)) lanes.set(key, []);
+    lanes.get(key)!.push(source);
+  }
 
-  while (keepDrawing) {
-    keepDrawing = false;
-    for (const bucket of sources) {
-      if (drawIndex < bucket.length) {
-        result.push(bucket[drawIndex]);
-        keepDrawing = true;
+  // ── Step 3: Lane draw priority — rarest pillar first ─────────────────────
+  // Order matters: lanes drawn first get higher pool-head placement.
+  // Toys, manga, infotainment historically yield FEWEST candidates so they
+  // get first dibs on the pool head. 'unknown' goes last so untrained feeds
+  // don't crowd out feeds we know are useful for scarce pillars.
+  const lanePriority: LaneKey[] = ['toys', 'infotainment', 'manga', 'anime', 'gaming', 'unknown'];
+
+  // ── Step 4: Round-robin draw across lanes, then sources within lane ──────
+  const result: PoolItem[] = [];
+  const sourceCursor = new Map<LaneKey, number>(); // which source is next in each lane
+
+  let progress = true;
+  while (progress) {
+    progress = false;
+    for (const lane of lanePriority) {
+      const sources = lanes.get(lane);
+      if (!sources || sources.length === 0) continue;
+
+      // Try each source in this lane until we find one with items left
+      const start = sourceCursor.get(lane) ?? 0;
+      let attempted = 0;
+      let found = false;
+
+      while (attempted < sources.length && !found) {
+        const idx     = (start + attempted) % sources.length;
+        const source  = sources[idx];
+        const bucket  = bySource.get(source);
+        if (bucket && bucket.length > 0) {
+          result.push(bucket.shift()!);
+          sourceCursor.set(lane, (idx + 1) % sources.length);
+          found = true;
+          progress = true;
+        }
+        attempted++;
       }
     }
-    drawIndex++;
   }
 
   return result;
@@ -259,6 +300,40 @@ class FeedMemory {
       weighted += rate * need;
     }
     return Math.min(1, Math.max(0, weighted));
+  }
+
+  /**
+   * Return the pillar this feed has produced MOST often historically.
+   * Returns null if the feed has no recorded history.
+   *
+   * Used by the pillar-aware pool interleave to predict each source's
+   * likely classification before the LLM is called.
+   */
+  dominantPillar(feedDomain: string): Pillar | null {
+    const counts = this.data[feedDomain];
+    if (!counts) return null;
+
+    let maxCount = 0;
+    let dominant: Pillar | null = null;
+    for (const p of PILLARS) {
+      if (counts[p] > maxCount) {
+        maxCount = counts[p];
+        dominant = p;
+      }
+    }
+    return maxCount > 0 ? dominant : null;
+  }
+
+  /**
+   * Return the historical share (0-1) that this feed has produced for
+   * the given pillar. Returns 0 if no history.
+   */
+  pillarShare(feedDomain: string, pillar: Pillar): number {
+    const counts = this.data[feedDomain];
+    if (!counts) return 0;
+    const total = PILLARS.reduce((s, p) => s + counts[p], 0);
+    if (total === 0) return 0;
+    return counts[pillar] / total;
   }
 
   /** Human-readable summary of what each feed has historically produced. */
@@ -391,138 +466,6 @@ Respond ONLY with the JSON object.`;
     }
   }
 
-  // ── Core triage loop ─────────────────────────────────────────────────────────
-
-  private async triagePool(
-    pool: PoolItem[],
-    buckets: Record<Pillar, ScoutItem[]>,
-    memory: FeedMemory,
-    triagedUrls: Set<string>,  // populated here so retries skip already-triaged items
-    roundLabel: string
-  ): Promise<void> {
-    const allFull = () => PILLARS.every((p) => buckets[p].length >= MAX_CANDIDATES_PER_PILLAR);
-    // `let` because we reassign via .filter() when pulling the batch
-    let remaining = [...pool];
-    let batchNum = 0;
-
-    while (remaining.length > 0 && !allFull()) {
-      const fullPillars = PILLARS.filter((p) => buckets[p].length >= MAX_CANDIDATES_PER_PILLAR);
-      const openPillars = PILLARS.filter((p) => buckets[p].length < MAX_CANDIDATES_PER_PILLAR);
-
-      // ── Bucket-aware batch construction ──────────────────────────────────
-      //
-      // Score every remaining item given the CURRENT bucket state, then split
-      // into two tiers:
-      //
-      //   Preferred — feeds scoring ≥ USEFUL_SCORE_THRESHOLD:
-      //     These feeds have meaningful historical affinity for at least one
-      //     open pillar. Use them first.
-      //
-      //   Fallback  — feeds scoring < USEFUL_SCORE_THRESHOLD:
-      //     These feeds predominantly produce content for pillar(s) that are
-      //     already full. Only pulled into the batch when the preferred pool
-      //     cannot fill the full BATCH_SIZE.
-      //
-      // This guarantees that once gaming (for example) is full, the Scout
-      // exhausts all feeds with non-gaming affinity before touching 4Gamer
-      // or other gaming-heavy sources.  Even then those sources may contain
-      // the occasional off-pillar article, so they are never skipped entirely.
-      const scored = remaining.map((item) => ({
-        item,
-        score: memory.score(item.sourceFeed, buckets),
-      }));
-
-      const preferred = scored
-        .filter((s) => s.score >= USEFUL_SCORE_THRESHOLD)
-        .sort((a, b) => b.score - a.score);
-
-      const fallback = scored
-        .filter((s) => s.score < USEFUL_SCORE_THRESHOLD)
-        .sort((a, b) => b.score - a.score);
-
-      const batchScored = [...preferred, ...fallback].slice(0, BATCH_SIZE);
-      const batch       = batchScored.map((s) => s.item);
-
-      // Remove the selected items from the remaining pool
-      const batchLinks = new Set(batch.map((i) => i.link));
-      remaining = remaining.filter((i) => !batchLinks.has(i.link));
-
-      batchNum++;
-
-      // ── Batch composition log ─────────────────────────────────────────────
-      const prefCount = batchScored.filter((s) => s.score >= USEFUL_SCORE_THRESHOLD).length;
-      const fbCount   = batchScored.length - prefCount;
-
-      if (fullPillars.length > 0) {
-        const tierNote = fbCount > 0
-          ? `${prefCount} preferred + ${fbCount} fallback (full: [${fullPillars.join(', ')}])`
-          : `${prefCount} preferred`;
-        this.log(
-          `[Scout] ${roundLabel} — Batch ${batchNum} (${batch.length} items): ${tierNote}` +
-          ` | open: [${openPillars.join(', ')}] | ${remaining.length} remaining`
-        );
-      } else {
-        this.log(
-          `[Scout] ${roundLabel} — Batch ${batchNum} (${batch.length} items, ${remaining.length} remaining)`
-        );
-      }
-
-      // Mark all batch items as triaged BEFORE the LLM call so retries
-      // never re-evaluate the same URL regardless of outcome
-      for (const item of batch) triagedUrls.add(item.link);
-
-      const results = await Promise.all(
-        batch.map((item) => this.triageItem(item.title, item.summary))
-      );
-
-      let accepted = 0, rejected = 0, errors = 0, dropped = 0;
-
-      for (let j = 0; j < results.length; j++) {
-        const result = results[j];
-        const item   = batch[j];
-
-        if (result.status === 'REJECTED') {
-          rejected++;
-          this.log(`[Scout] ✗ REJECTED  — ${result.reason} | "${item.title}"`);
-          continue;
-        }
-
-        if (result.status === 'PARSE_ERROR') {
-          errors++;
-          this.log(`[Scout] ✗ ERROR     — ${result.reason} | "${item.title}"`);
-          continue;
-        }
-
-        // APPROVED — update empirical memory regardless of bucket state
-        memory.record(item.sourceFeed, result.pillar);
-
-        const bucket = buckets[result.pillar];
-        if (bucket.length < MAX_CANDIDATES_PER_PILLAR) {
-          bucket.push({
-            title:            item.title,
-            link:             item.link,
-            summary:          item.summary,
-            pillar:           result.pillar,
-            translationNotes: result.translation_notes,
-          });
-          accepted++;
-          this.log(
-            `[Scout] ✓ ACCEPTED  [${result.pillar}] (${bucket.length}/${MAX_CANDIDATES_PER_PILLAR}) ` +
-            `[${item.sourceFeed}] | "${item.title}"`
-          );
-        } else {
-          dropped++;
-          this.log(`[Scout] ~ FULL [${result.pillar}] [${item.sourceFeed}] | "${item.title}"`);
-        }
-      }
-
-      const state = PILLARS.map((p) => `${p}:${buckets[p].length}`).join('  ');
-      this.log(
-        `[Scout] Batch ${batchNum} — ✓${accepted} ✗${rejected} err:${errors} drop:${dropped} | ${state}`
-      );
-    }
-  }
-
   // ── Build deduplicated pool ───────────────────────────────────────────────────
 
   /**
@@ -533,9 +476,10 @@ Respond ONLY with the JSON object.`;
    * Pool construction:
    *   1. All feeds are fetched concurrently.
    *   2. Raw items are deduplicated by URL.
-   *   3. fairSourceInterleave() groups by source, sorts each bucket
-   *      newest-first, then round-robins across all sources so the pool
-   *      head always contains maximum publisher diversity.
+   *   3. fairPillarInterleave() groups sources by predicted dominant pillar
+   *      (from FeedMemory) and round-robins across pillar lanes (rare-first),
+   *      then within each lane across sources. The pool head spans all 5
+   *      predicted pillars before any single source is repeated.
    *   4. Age filter and processed/triaged URL pruning are applied to the
    *      interleaved order (preserving it).
    *   5. The first `maxItems` survivors are returned — order is intentional,
@@ -552,6 +496,7 @@ Respond ONLY with the JSON object.`;
     ageDays:      number,
     rejectedUrls: Set<string>,
     triagedUrls:  Set<string>,
+    memory:       FeedMemory,
     maxItems:     number = FRESH_POOL_SIZE
   ): Promise<PoolItem[]> {
     // ── Step 1: Fetch all feeds concurrently (with per-feed fallback) ─────────
@@ -579,14 +524,23 @@ Respond ONLY with the JSON object.`;
       }
     }
 
-    // ── Step 3: Fair-source interleave ────────────────────────────────────────
-    // Round-robin across source buckets (each sorted newest-first) so batch 1
-    // always contains one article from every active publisher.
-    const interleaved = fairSourceInterleave(rawItems);
+    // ── Step 3: Pillar-aware fair interleave ──────────────────────────────────
+    // Group sources by their predicted dominant pillar (from FeedMemory),
+    // then round-robin across pillar lanes (rare-first) and within each
+    // lane across sources. Result: pool head spans all 5 predicted pillars.
+    const interleaved = fairPillarInterleave(rawItems, memory);
 
     const sourceCount = new Set(rawItems.map((i) => i.sourceFeed)).size;
+    const laneSummary = new Map<string, number>();
+    for (const it of rawItems) {
+      const lane = memory.dominantPillar(it.sourceFeed) ?? 'unknown';
+      laneSummary.set(lane, (laneSummary.get(lane) ?? 0) + 1);
+    }
+    const laneStr = [...laneSummary.entries()]
+      .map(([lane, n]) => `${lane}:${n}`)
+      .join('  ');
     this.log(
-      `[Scout] Fair-source interleave — ${interleaved.length} items across ${sourceCount} source(s)`
+      `[Scout] Pillar-fair interleave — ${interleaved.length} items across ${sourceCount} source(s) | lanes: ${laneStr}`
     );
 
     // ── Step 4: Age filter (preserves interleaved order) ─────────────────────
@@ -745,20 +699,40 @@ Respond ONLY with the JSON object.`;
     return buckets;
   }
 
-  // ── No-cap triage ─────────────────────────────────────────────────────────────
+  // ── Bucket-aware triage ──────────────────────────────────────────────────────
 
   /**
-   * Triage every item in `pool` and return ALL approved ScoutItems.
+   * Triage `pool` and return approved ScoutItems with **dynamic per-pillar
+   * fill awareness**.
    *
-   * Unlike the old triagePool(), this method enforces NO quota cap —
-   * that responsibility belongs exclusively to the Master Orchestrator.
+   * Unlike the old triagePool(), this caps each pillar at MAX_CANDIDATES_PER_PILLAR
+   * INTERNALLY so the Scout never wastes LLM calls on items destined for a full
+   * bucket. The Master Orchestrator still does its own dedup/cap, but the Scout
+   * stops pushing once each pillar is satisfied.
    *
-   * Feed scoring still uses `scoringBuckets` so the preferred/fallback
-   * tier logic prioritises feeds relevant to the missing pillars.
+   * Four critical behaviours:
    *
-   * If `filterPillars` is provided (non-empty), only items whose LLM-assigned
-   * pillar is in that set are included in the returned array.  FeedMemory is
-   * still updated for ALL approved items regardless of the filter.
+   *   1. **Local mutable buckets** — `localBuckets` mirrors current accepted
+   *      counts and is what feeds into `memory.score()`. As gaming fills, the
+   *      score for gaming-dominant feeds collapses to 0, demoting them past
+   *      the USEFUL_SCORE_THRESHOLD into the fallback tier.
+   *
+   *   2. **Predictive skip** — items from sources with ≥70% historical
+   *      affinity for an already-full pillar are dropped BEFORE the LLM call.
+   *      Saves LLM cost; the LLM almost always agrees with strong source priors.
+   *
+   *   3. **Early termination** — when all 5 pillars hit
+   *      MAX_CANDIDATES_PER_PILLAR (or all filterPillars are full), the loop
+   *      breaks immediately. No more batches, no more LLM calls.
+   *
+   *   4. **Hard pillar cap** — even after LLM approval, items for full pillars
+   *      are dropped (instead of being returned for the Master to discard).
+   *
+   * `scoringBuckets` is used as the INITIAL state. For round_1 it's all empty;
+   * for underquota/fallback it's pre-filled to mark satisfied pillars.
+   *
+   * If `filterPillars` is non-empty, items outside that set are skipped and
+   * never count toward fill state.
    */
   private async triageAll(
     pool:          PoolItem[],
@@ -768,15 +742,38 @@ Respond ONLY with the JSON object.`;
     roundLabel:    string,
     filterPillars?: Set<Pillar>
   ): Promise<ScoutItem[]> {
+    const PREDICTIVE_SKIP_THRESHOLD = 0.7; // skip if source is ≥70% affinity for full pillar
+
+    // Deep-copy scoringBuckets so we can mutate locally without polluting the caller.
+    const localBuckets: Record<Pillar, ScoutItem[]> = {
+      anime:        [...scoringBuckets.anime],
+      gaming:       [...scoringBuckets.gaming],
+      infotainment: [...scoringBuckets.infotainment],
+      manga:        [...scoringBuckets.manga],
+      toys:         [...scoringBuckets.toys],
+    };
+
+    /** Active pillars = the ones we're still trying to fill. */
+    const activePillars: Pillar[] = filterPillars && filterPillars.size > 0
+      ? PILLARS.filter((p) => filterPillars.has(p))
+      : [...PILLARS];
+
+    const allActiveFull = (): boolean =>
+      activePillars.every((p) => localBuckets[p].length >= MAX_CANDIDATES_PER_PILLAR);
+
+    const isPillarFull = (p: Pillar): boolean =>
+      localBuckets[p].length >= MAX_CANDIDATES_PER_PILLAR;
+
     const results:   ScoutItem[] = [];
     let   remaining              = [...pool];
     let   batchNum               = 0;
+    let   predictiveSkipTotal    = 0;
 
-    while (remaining.length > 0) {
-      // ── Score remaining items using feed memory + current scoring buckets ──
+    while (remaining.length > 0 && !allActiveFull()) {
+      // ── Score remaining items using DYNAMIC localBuckets ─────────────────
       const scored = remaining.map((item) => ({
         item,
-        score: memory.score(item.sourceFeed, scoringBuckets),
+        score: memory.score(item.sourceFeed, localBuckets),
       }));
 
       const preferred = scored
@@ -787,21 +784,66 @@ Respond ONLY with the JSON object.`;
         .filter((s) => s.score < USEFUL_SCORE_THRESHOLD)
         .sort((a, b) => b.score - a.score);
 
-      const batchScored = [...preferred, ...fallback].slice(0, BATCH_SIZE);
-      const batch       = batchScored.map((s) => s.item);
-      const batchLinks  = new Set(batch.map((i) => i.link));
-      remaining = remaining.filter((i) => !batchLinks.has(i.link));
+      // ── Predictive skip: drop items whose source overwhelmingly produces ─
+      //    content for an already-full pillar.  Skipped items still get
+      //    marked as triaged so they don't reappear in later dispatches.
+      const candidates = [...preferred, ...fallback];
+      const batch:       PoolItem[] = [];
+      const skippedHere: PoolItem[] = [];
+
+      for (const { item } of candidates) {
+        if (batch.length >= BATCH_SIZE) break;
+
+        // Find pillars this source has strong affinity for AND that are full
+        let predictiveSkip = false;
+        for (const p of activePillars) {
+          if (!isPillarFull(p)) continue;
+          if (memory.pillarShare(item.sourceFeed, p) >= PREDICTIVE_SKIP_THRESHOLD) {
+            predictiveSkip = true;
+            break;
+          }
+        }
+
+        if (predictiveSkip) {
+          skippedHere.push(item);
+        } else {
+          batch.push(item);
+        }
+      }
+
+      // Items we examined this batch (whether picked or pre-skipped) are
+      // removed from `remaining` so we don't reconsider them
+      const handledLinks = new Set([
+        ...batch.map((i) => i.link),
+        ...skippedHere.map((i) => i.link),
+      ]);
+      remaining = remaining.filter((i) => !handledLinks.has(i.link));
+
+      // Mark predictive skips as triaged immediately so retries don't fetch them
+      for (const item of skippedHere) triagedUrls.add(item.link);
+      predictiveSkipTotal += skippedHere.length;
+
+      // If predictive skip drained the candidates and batch is empty, loop again
+      if (batch.length === 0 && skippedHere.length > 0) {
+        this.log(
+          `[Scout] ${roundLabel} — predictive skip dropped ${skippedHere.length} item(s) ` +
+          `(source ≥${(PREDICTIVE_SKIP_THRESHOLD * 100).toFixed(0)}% affinity for full pillar)`
+        );
+        continue;
+      }
+      if (batch.length === 0) break;
 
       batchNum++;
 
-      const prefCount = batchScored.filter((s) => s.score >= USEFUL_SCORE_THRESHOLD).length;
-      const fbCount   = batchScored.length - prefCount;
-      const tierNote  = fbCount > 0
-        ? `${prefCount} preferred + ${fbCount} fallback`
-        : `${prefCount} preferred`;
+      const fillState = activePillars
+        .map((p) => `${p}:${localBuckets[p].length}/${MAX_CANDIDATES_PER_PILLAR}`)
+        .join(' ');
+      const skipNote = skippedHere.length > 0
+        ? ` | predictive-skip:${skippedHere.length}`
+        : '';
 
       this.log(
-        `[Scout] ${roundLabel} — Batch ${batchNum} (${batch.length} items, ${tierNote}, ${remaining.length} remaining)`
+        `[Scout] ${roundLabel} — Batch ${batchNum} (${batch.length} items${skipNote}, ${remaining.length} remaining) | ${fillState}`
       );
 
       // Mark all batch items as triaged BEFORE the LLM call
@@ -811,7 +853,7 @@ Respond ONLY with the JSON object.`;
         batch.map((item) => this.triageItem(item.title, item.summary))
       );
 
-      let accepted = 0, rejected = 0, skipped = 0, errors = 0;
+      let accepted = 0, rejected = 0, skipped = 0, errors = 0, capped = 0;
 
       for (let j = 0; j < triageResults.length; j++) {
         const result = triageResults[j];
@@ -841,21 +883,44 @@ Respond ONLY with the JSON object.`;
           continue;
         }
 
-        results.push({
+        // Hard pillar cap — drop if this pillar is already full locally
+        if (isPillarFull(result.pillar)) {
+          capped++;
+          this.log(
+            `[Scout] ~ FULL     [${result.pillar}] (${localBuckets[result.pillar].length}/${MAX_CANDIDATES_PER_PILLAR}) | "${item.title}"`
+          );
+          continue;
+        }
+
+        const scoutItem: ScoutItem = {
           title:            item.title,
           link:             item.link,
           summary:          item.summary,
           pillar:           result.pillar,
           translationNotes: result.translation_notes,
-        });
+        };
+        localBuckets[result.pillar].push(scoutItem);
+        results.push(scoutItem);
         accepted++;
         this.log(
-          `[Scout] ✓ ACCEPTED  [${result.pillar}] [${item.sourceFeed}] | "${item.title}"`
+          `[Scout] ✓ ACCEPTED  [${result.pillar}] (${localBuckets[result.pillar].length}/${MAX_CANDIDATES_PER_PILLAR}) ` +
+          `[${item.sourceFeed}] | "${item.title}"`
         );
       }
 
       this.log(
-        `[Scout] Batch ${batchNum} done — ✓${accepted} ✗${rejected} skip:${skipped} err:${errors}`
+        `[Scout] Batch ${batchNum} done — ✓${accepted} ✗${rejected} skip:${skipped} cap:${capped} err:${errors} | ${activePillars.map((p) => `${p}:${localBuckets[p].length}`).join(' ')}`
+      );
+    }
+
+    if (allActiveFull()) {
+      this.log(
+        `[Scout] ${roundLabel} — All active pillars satisfied. Stopping early ` +
+        `(${remaining.length} item(s) untouched, ${predictiveSkipTotal} predictively skipped).`
+      );
+    } else if (predictiveSkipTotal > 0) {
+      this.log(
+        `[Scout] ${roundLabel} — total predictive skips: ${predictiveSkipTotal} (LLM calls saved)`
       );
     }
 
@@ -960,7 +1025,7 @@ Respond ONLY with the JSON object.`;
     );
 
     const pool = await this.buildPool(
-      feedUrls, ageDays, rejectedUrls, triagedUrls, maxItems
+      feedUrls, ageDays, rejectedUrls, triagedUrls, this.memory, maxItems
     );
 
     if (pool.length === 0) {
