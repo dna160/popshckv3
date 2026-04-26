@@ -23,16 +23,13 @@
 import path from 'path';
 import fs   from 'fs/promises';
 import { PrismaClient }            from '@prisma/client';
-import { fetchFeed, PRIORITY_FEEDS, FALLBACK_FEEDS, FEED_FALLBACK_MAP } from '../services/rss';
+import { fetchFeed, PRIORITY_FEEDS, FEED_FALLBACK_MAP } from '../services/rss';
 import { chat, parseJsonResponse }  from '../services/llm';
 import { PILLARS }                  from '../shared/types';
 import type { Pillar, ScoutItem }   from '../shared/types';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const UNDERQUOTA_POOL_SIZE = 100;  // expanded from 50 — Underquota now pulls from
-                                    // PRIORITY_FEEDS + FALLBACK_FEEDS so the raw
-                                    // pool is larger and we want a bigger window
-                                    // before dedup against triagedUrls
+const UNDERQUOTA_POOL_SIZE = 50;
 const BATCH_SIZE           = 10;
 const AGE_LIMIT_DAYS       = 14;   // extended from 7 — under-served pillars
                                     // (toys, infotainment, manga) often have
@@ -213,26 +210,39 @@ export class UnderquotaProtocol {
   }
 
   /**
-   * Return the URLs of every PRIORITY_FEEDS + FALLBACK_FEEDS entry whose tags
-   * include at least one of the target pillars, deduplicated and in
-   * declaration order (PRIORITY_FEEDS first, FALLBACK_FEEDS appended).
+   * Return the URLs of every PRIORITY_FEEDS entry whose tags include at least
+   * one of the target pillars, deduplicated and in declaration order.
    *
-   * The FALLBACK_FEEDS expansion is critical: PRIORITY_FEEDS items are mostly
-   * already in `triagedUrls` after Round 1, so without the fallback expansion
-   * the underquota pool empties after 1-2 rounds. FALLBACK_FEEDS are
-   * NOT used by Round 1, so their items are guaranteed fresh on the first
-   * underquota dispatch.
+   * Feeds are filtered by tag accuracy (which has been recalibrated in
+   * services/rss.ts based on actual FeedMemory output) and ordered by the
+   * `confidence` rating where present so high-yield sources are at the head
+   * of the URL list before fetch.
    */
   private getFeedsForPillars(targetPillars: Pillar[]): string[] {
     const seen = new Set<string>();
     const urls: string[] = [];
 
-    for (const feed of [...PRIORITY_FEEDS, ...FALLBACK_FEEDS]) {
-      if (feed.tags.some((tag) => targetPillars.includes(tag))) {
-        if (!seen.has(feed.url)) {
-          seen.add(feed.url);
-          urls.push(feed.url);
-        }
+    // Sort feeds by confidence (high → medium → low → unverified) so
+    // high-yield sources are fetched first. Stable sort preserves declaration
+    // order within the same confidence tier.
+    const confidenceWeight = (c?: 'high' | 'medium' | 'low' | 'unverified'): number => {
+      switch (c) {
+        case 'high':       return 0;
+        case 'medium':     return 1;
+        case 'low':        return 2;
+        case 'unverified': return 3;
+        default:           return 1; // unset → treat as medium
+      }
+    };
+
+    const candidates = [...PRIORITY_FEEDS]
+      .filter((feed) => feed.tags.some((tag) => targetPillars.includes(tag)))
+      .sort((a, b) => confidenceWeight(a.confidence) - confidenceWeight(b.confidence));
+
+    for (const feed of candidates) {
+      if (!seen.has(feed.url)) {
+        seen.add(feed.url);
+        urls.push(feed.url);
       }
     }
 

@@ -17,11 +17,32 @@ export interface RssItem {
   sourceFeed: string; // hostname of the feed URL this item came from
 }
 
-/** A feed entry with explicit pillar affinity tags and an optional fallback URL. */
+/**
+ * A feed entry with explicit pillar affinity tags, confidence rating, and
+ * optional fallback URL.
+ *
+ * Tags reflect the pillars this feed PREDOMINANTLY covers based on actual
+ * historical output (feed-memory.json), not just the publication's stated
+ * coverage. If a feed claims to cover infotainment but FeedMemory shows zero
+ * infotainment items in 30+ samples, the infotainment tag is removed.
+ *
+ * Confidence levels:
+ *   • 'high'       — proven feed: ≥30 historical items, consistently produces
+ *                    items for its tagged pillars. Underquota Protocol drains
+ *                    these first.
+ *   • 'medium'     — proven feed: 5–29 historical items, lower volume but
+ *                    reliable.
+ *   • 'low'        — proven but rare-yield: <5 historical items.
+ *   • 'unverified' — configured but never recorded items in FeedMemory.
+ *                    Either the URL is broken, the LLM rejects all items, or
+ *                    items get attributed to a Mastodon proxy. Drained LAST
+ *                    so verified sources are exhausted first.
+ */
 export interface FeedConfig {
-  url:      string;
-  tags:     Pillar[]; // pillars this feed predominantly covers
-  fallback?: string;  // tried automatically when `url` fails (4xx, 5xx, network error)
+  url:        string;
+  tags:       Pillar[];
+  confidence: 'high' | 'medium' | 'low' | 'unverified';
+  fallback?:  string;
 }
 
 /**
@@ -41,82 +62,163 @@ export interface FeedConfig {
  * e.g. natalie.mu/comic → tagged ['manga'] → activated when manga is underquota
  */
 export const PRIORITY_FEEDS: FeedConfig[] = [
-  // ── General / mixed-topic (Round 1 broad net) ──────────────────────────────
-  { url: 'https://automaton-media.com/feed/',             tags: ['gaming', 'anime', 'manga']                },
-  { url: 'https://www.4gamer.net/rss/index.xml',          tags: ['gaming']                                  },
-  { url: 'https://hobby.dengeki.com/feed/',               tags: ['toys', 'anime']                           },
-  { url: 'https://chaosphere.hostdon.jp/@natalie.rss',    tags: ['anime', 'manga', 'gaming', 'infotainment'] },
-  { url: 'https://news.denfaminicogamer.jp/feed',         tags: ['gaming', 'anime', 'manga']                },
-  { url: 'https://essential-japan.com/feed/',             tags: ['infotainment']                            },
-  { url: 'https://www.toy-people.com/rss.php',            tags: ['toys'],
-    fallback: 'https://hobby.dengeki.com/feed/'                                                              },
+  // ─────────────────────────────────────────────────────────────────────────
+  //   HIGH CONFIDENCE — Japanese RSS sources with proven historical output.
+  //   Tags reflect ACTUAL pillar distribution in FeedMemory, NOT the
+  //   publication's stated coverage. Sorted by total historical volume.
+  // ─────────────────────────────────────────────────────────────────────────
 
-  // ── Subpillar-specific branches (Underquota Protocol — Tier 1) ─────────────
-  // Manga
-  { url: 'https://natalie.mu/comic/feed',                 tags: ['manga'],
-    fallback: 'https://rss-mstdn.studiofreesia.com/@natalie_mu_comic.rss'                                    },
-  // Anime
-  { url: 'https://natalie.mu/anime/feed',                 tags: ['anime'],
-    fallback: 'https://rss-mstdn.studiofreesia.com/@animeanime.rss'                                          },
-  // Gaming
-  { url: 'https://natalie.mu/game/feed',                  tags: ['gaming'],
-    fallback: 'https://rss-mstdn.studiofreesia.com/@gamespark.rss'                                           },
-  // Infotainment
-  { url: 'https://natalie.mu/music/feed',                 tags: ['infotainment'],
-    fallback: 'https://rss-mstdn.studiofreesia.com/@oricon_news.rss'                                         },
-  // Toys / Collectibles
-  { url: 'https://www.amiami.com/eng/rss/newitem.xml',    tags: ['toys'],
-    fallback: 'https://hobby.dengeki.com/feed/'                                                              },
+  // ANN — 747 items: anime 69%, manga 16%, gaming 12%, toys 2%, info 1%.
+  // English-language but covers Japanese content end-to-end. Single most
+  // productive source overall.
+  {
+    url: 'https://www.animenewsnetwork.com/all/rss.xml?ann-edition=us',
+    tags: ['anime', 'manga', 'gaming', 'toys'],
+    confidence: 'high',
+  },
 
-  // ── Tokyo Hive + Oricon (General/Infotainment) ──────────────────────────────
-  { url: 'https://feeds.feedburner.com/tokyohive',        tags: ['infotainment', 'anime']                   },
-  { url: 'https://www.oricon.co.jp/rss/news/',            tags: ['infotainment'],
-    fallback: 'https://rss-mstdn.studiofreesia.com/@oricon_news.rss'                                         },
-  { url: 'https://www.oricon.co.jp/rss/music/',           tags: ['infotainment'],
-    fallback: 'https://rss-mstdn.studiofreesia.com/@oricon_news.rss'                                         },
-  { url: 'https://www.oricon.co.jp/rss/movie/',           tags: ['infotainment', 'anime'],
-    fallback: 'https://rss-mstdn.studiofreesia.com/@oricon_news.rss'                                         },
-  { url: 'https://www.oricon.co.jp/rss/special/',         tags: ['infotainment'],
-    fallback: 'https://rss-mstdn.studiofreesia.com/@oricon_news.rss'                                         },
+  // 4Gamer — 227 items: gaming 92%, toys 5%, anime 3%. Pure gaming with
+  // occasional figure/merch reviews tagged toys.
+  {
+    url:        'https://www.4gamer.net/rss/index.xml',
+    tags:       ['gaming', 'toys'],
+    confidence: 'high',
+  },
 
-  // ── Anime News Network (always-on reliable baseline) ─────────────────────
-  { url: 'https://www.animenewsnetwork.com/all/rss.xml?ann-edition=us', tags: ['anime', 'manga'] },
-];
+  // Denfaminicogamer — 212 items: gaming 64%, anime 13%, toys 11%, manga 7%,
+  // info 5%. The most pillar-diverse source we have.
+  {
+    url:        'https://news.denfaminicogamer.jp/feed',
+    tags:       ['gaming', 'anime', 'toys', 'manga', 'infotainment'],
+    confidence: 'high',
+  },
 
-/**
- * ── Tier 3: Fallback / Expansion Feeds (Underquota Protocol Only) ─────────────
- *
- * NOT used by Scout's Round 1. Activated EXCLUSIVELY by Underquota Protocol
- * when the primary tagged feeds are exhausted within a pipeline run.
- *
- * Rationale: Round 1 stays focused on its proven high-quality sources. When
- * Underquota fires for a deficit pillar, it gets access to a SECOND pool of
- * sources that haven't been touched yet in this run — bypassing the
- * triagedUrls dedup that empties the primary pool after 1-2 underquota rounds.
- *
- * Selection criteria:
- *   • Sources with proven historical pillar affinity (animecorner, toyark)
- *   • Well-known English-language Japanese pop-culture publications
- *   • Sources NOT already in PRIORITY_FEEDS (otherwise they'd be deduped out)
- *
- * Failed feeds (404, network) return [] gracefully — no impact on success path.
- */
-export const FALLBACK_FEEDS: FeedConfig[] = [
-  // ── Anime / Manga / Gaming combined coverage ──────────────────────────────
-  { url: 'https://animecorner.me/feed/',                  tags: ['anime', 'manga', 'gaming'] },
+  // Automaton — 115 items: gaming 100%. Pure gaming despite formerly being
+  // tagged for anime/manga; the LLM never classifies its output as those.
+  {
+    url:        'https://automaton-media.com/feed/',
+    tags:       ['gaming'],
+    confidence: 'high',
+  },
 
-  // ── Toys / Collectibles ───────────────────────────────────────────────────
-  { url: 'https://www.toyark.com/feed/',                  tags: ['toys'] },
+  // Chaosphere (Natalie Mastodon proxy) — 71 items: manga 65%, anime 30%,
+  // info 4%, toys 1%. Aggregates natalie.mu's manga/anime verticals via
+  // Mastodon since the direct natalie.mu/comic|anime feeds don't surface
+  // any items in our memory.
+  {
+    url:        'https://chaosphere.hostdon.jp/@natalie.rss',
+    tags:       ['manga', 'anime', 'infotainment'],
+    confidence: 'high',
+  },
 
-  // ── Japanese pop-culture / infotainment ───────────────────────────────────
-  { url: 'https://soranews24.com/feed/',                  tags: ['infotainment', 'anime', 'gaming'] },
-  { url: 'https://otakuusamagazine.com/feed/',            tags: ['anime', 'manga', 'infotainment'] },
+  // Dengeki Hobby — 44 items: toys 82%, manga 9%, gaming 5%, anime 2%,
+  // info 2%. Reliable toys/figures source. Dropped 'anime' tag (only 1 item).
+  {
+    url:        'https://hobby.dengeki.com/feed/',
+    tags:       ['toys', 'manga'],
+    confidence: 'high',
+  },
 
-  // ── Manga-specific ────────────────────────────────────────────────────────
-  { url: 'https://www.cbr.com/feed/category/manga-news/', tags: ['manga'] },
+  // Essential Japan — 34 items: gaming 56%, anime 35%, manga 9%.
+  // ⚠️ HISTORICAL TAG WAS WRONG: previously tagged ['infotainment'] but
+  // memory shows ZERO infotainment classifications. Retagged to actual output.
+  {
+    url:        'https://essential-japan.com/feed/',
+    tags:       ['gaming', 'anime', 'manga'],
+    confidence: 'medium',
+  },
 
-  // ── Anime-specific ────────────────────────────────────────────────────────
-  { url: 'https://www.cbr.com/feed/category/anime-news/', tags: ['anime'] },
+  // ─────────────────────────────────────────────────────────────────────────
+  //   UNVERIFIED — feeds configured but never recorded items in FeedMemory.
+  //   Possible causes: broken URL, LLM rejects all output as off-pillar, or
+  //   items aggregated through a proxy (chaosphere) that takes the credit.
+  //   Kept in the list at low priority — failures cost nothing (parser
+  //   returns []), and any successful pulls help fill scarce-pillar buckets.
+  //   Underquota Protocol drains these LAST, after high/medium-confidence
+  //   sources are exhausted.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Natalie.mu subpillar verticals — 0 items recorded in our memory, but the
+  // Mastodon proxy chaosphere does surface natalie.mu content (counted under
+  // chaosphere, not natalie.mu, due to source URL attribution).
+  {
+    url:        'https://natalie.mu/comic/feed',
+    tags:       ['manga'],
+    confidence: 'unverified',
+    fallback:   'https://rss-mstdn.studiofreesia.com/@natalie_mu_comic.rss',
+  },
+  {
+    url:        'https://natalie.mu/anime/feed',
+    tags:       ['anime'],
+    confidence: 'unverified',
+    fallback:   'https://rss-mstdn.studiofreesia.com/@animeanime.rss',
+  },
+  {
+    url:        'https://natalie.mu/game/feed',
+    tags:       ['gaming'],
+    confidence: 'unverified',
+    fallback:   'https://rss-mstdn.studiofreesia.com/@gamespark.rss',
+  },
+  {
+    url:        'https://natalie.mu/music/feed',
+    tags:       ['infotainment'],
+    confidence: 'unverified',
+    fallback:   'https://rss-mstdn.studiofreesia.com/@oricon_news.rss',
+  },
+
+  // Oricon — Japan's Billboard equivalent (J-pop, idols, drama, films).
+  // The only sources tagged for infotainment that aren't Mastodon-proxied.
+  // 0 items in memory but kept active because they're our strongest
+  // structural answer for the infotainment pillar.
+  {
+    url:        'https://www.oricon.co.jp/rss/news/',
+    tags:       ['infotainment'],
+    confidence: 'unverified',
+    fallback:   'https://rss-mstdn.studiofreesia.com/@oricon_news.rss',
+  },
+  {
+    url:        'https://www.oricon.co.jp/rss/music/',
+    tags:       ['infotainment'],
+    confidence: 'unverified',
+    fallback:   'https://rss-mstdn.studiofreesia.com/@oricon_news.rss',
+  },
+  {
+    url:        'https://www.oricon.co.jp/rss/movie/',
+    tags:       ['infotainment', 'anime'],
+    confidence: 'unverified',
+    fallback:   'https://rss-mstdn.studiofreesia.com/@oricon_news.rss',
+  },
+  {
+    url:        'https://www.oricon.co.jp/rss/special/',
+    tags:       ['infotainment'],
+    confidence: 'unverified',
+    fallback:   'https://rss-mstdn.studiofreesia.com/@oricon_news.rss',
+  },
+
+  // TokyoHive — Korean+Japanese pop/idol news. 0 items in memory.
+  {
+    url:        'https://feeds.feedburner.com/tokyohive',
+    tags:       ['infotainment', 'anime'],
+    confidence: 'unverified',
+  },
+
+  // AmiAmi — anime figure/toy retailer feed. 0 items in memory; the English
+  // subdomain may not actually serve RSS.
+  {
+    url:        'https://www.amiami.com/eng/rss/newitem.xml',
+    tags:       ['toys'],
+    confidence: 'unverified',
+    fallback:   'https://hobby.dengeki.com/feed/',
+  },
+
+  // Toy People News — toys/figures news. 0 items in memory; legacy PHP RSS
+  // may have changed.
+  {
+    url:        'https://www.toy-people.com/rss.php',
+    tags:       ['toys'],
+    confidence: 'unverified',
+    fallback:   'https://hobby.dengeki.com/feed/',
+  },
 ];
 
 /**
@@ -163,11 +265,10 @@ export const RSS_FEEDS: Record<Pillar, string[]> = {
 
 /**
  * Lookup map: primary feed URL → fallback URL.
- * Built automatically from PRIORITY_FEEDS + FALLBACK_FEEDS so callers don't
- * have to scan the arrays.
+ * Built automatically from PRIORITY_FEEDS so callers don't have to scan the array.
  */
 export const FEED_FALLBACK_MAP: ReadonlyMap<string, string> = new Map(
-  [...PRIORITY_FEEDS, ...FALLBACK_FEEDS]
+  PRIORITY_FEEDS
     .filter((f): f is FeedConfig & { fallback: string } => Boolean(f.fallback))
     .map((f) => [f.url, f.fallback])
 );
