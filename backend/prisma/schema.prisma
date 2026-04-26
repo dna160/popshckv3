@@ -39,6 +39,7 @@ model SocialPost {
   status        String    @default("PENDING") // PENDING, POSTED, FAILED
   postedAt      DateTime?
   igPostId      String?
+  igStoryId     String?
   fbPostId      String?
   xPostId       String?
   tiktokPostId  String?

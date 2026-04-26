@@ -16,6 +16,7 @@
 
 import {
   postToInstagram,
+  postStoryToInstagram,
   postToFacebook,
   postToX,
   postToTikTok,
@@ -24,6 +25,7 @@ import {
 
 export interface SocialPublishResult {
   igPostId?:      string;
+  igStoryId?:     string;
   fbPostId?:      string;
   xPostId?:       string;
   tiktokPostId?:  string;
@@ -44,7 +46,7 @@ export class SocialPublisher {
     caption:       string;
     articleUrl:    string;
   }): Promise<SocialPublishResult> {
-    const { postBuffer, storyBuffer, postImageUrl, caption, articleUrl } = params;
+    const { postBuffer, storyBuffer, postImageUrl, storyImageUrl, caption, articleUrl } = params;
 
     this.log('[SocialPublisher] Dispatching to all platforms concurrently…');
 
@@ -59,8 +61,9 @@ export class SocialPublisher {
     }
 
     // ── Concurrent platform dispatch ─────────────────────────────────────────
-    const [igResult, fbResult, xResult, tiktokResult] = await Promise.allSettled([
+    const [igFeedResult, igStoryResult, fbResult, xResult, tiktokResult] = await Promise.allSettled([
       postToInstagram({ imageUrl: postImageUrl, caption }),
+      postStoryToInstagram({ imageUrl: storyImageUrl }),
       postToFacebook({ imageUrl: postImageUrl, caption }),
       postToX({ imageBuffer: storyBuffer, caption, articleUrl }),
       videoBuffer
@@ -70,11 +73,18 @@ export class SocialPublisher {
 
     const result: SocialPublishResult = {};
 
-    if (igResult.status === 'fulfilled') {
-      result.igPostId = igResult.value;
-      this.log(`[SocialPublisher] ✓ Instagram posted → ID: ${igResult.value}`);
+    if (igFeedResult.status === 'fulfilled') {
+      result.igPostId = igFeedResult.value;
+      this.log(`[SocialPublisher] ✓ Instagram feed posted → ID: ${igFeedResult.value}`);
     } else {
-      this.log(`[SocialPublisher] ✗ Instagram failed: ${igResult.reason}`);
+      this.log(`[SocialPublisher] ✗ Instagram feed failed: ${igFeedResult.reason}`);
+    }
+
+    if (igStoryResult.status === 'fulfilled') {
+      result.igStoryId = igStoryResult.value;
+      this.log(`[SocialPublisher] ✓ Instagram story posted → ID: ${igStoryResult.value}`);
+    } else {
+      this.log(`[SocialPublisher] ✗ Instagram story failed: ${igStoryResult.reason}`);
     }
 
     if (fbResult.status === 'fulfilled') {
@@ -99,7 +109,7 @@ export class SocialPublisher {
     }
 
     const successCount = Object.keys(result).length;
-    this.log(`[SocialPublisher] Complete — ${successCount}/4 platforms succeeded`);
+    this.log(`[SocialPublisher] Complete — ${successCount}/5 platforms succeeded`);
 
     return result;
   }

@@ -203,6 +203,7 @@ export class SocialMediaOrchestrator {
       status:        anyPosted ? 'POSTED' : 'FAILED',
       postedAt:      anyPosted ? new Date() : undefined,
       igPostId:      socialResult.igPostId,
+      igStoryId:     socialResult.igStoryId,
       fbPostId:      socialResult.fbPostId,
       xPostId:       socialResult.xPostId,
       tiktokPostId:  socialResult.tiktokPostId,
@@ -210,8 +211,8 @@ export class SocialMediaOrchestrator {
 
     this.log(
       `[SocialOrchestrator] ✓ Done for article ${articleId} — ` +
-      `IG:${!!socialResult.igPostId} FB:${!!socialResult.fbPostId} ` +
-      `X:${!!socialResult.xPostId} TikTok:${!!socialResult.tiktokPostId}`
+      `IG feed:${!!socialResult.igPostId} IG story:${!!socialResult.igStoryId} ` +
+      `FB:${!!socialResult.fbPostId} X:${!!socialResult.xPostId} TikTok:${!!socialResult.tiktokPostId}`
     );
   }
 
@@ -227,6 +228,7 @@ export class SocialMediaOrchestrator {
     status:        string;
     postedAt?:     Date;
     igPostId?:     string;
+    igStoryId?:    string;
     fbPostId?:     string;
     xPostId?:      string;
     tiktokPostId?: string;
