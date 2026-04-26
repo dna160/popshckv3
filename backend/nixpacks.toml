@@ -2,7 +2,7 @@
 cmds = ["npm install"]
 
 [phases.build]
-cmds = ["npx prisma generate", "npm run build"]
+cmds = ["npx prisma generate", "npm run build", "cp -r src/agents/social_media/assets dist/agents/social_media/assets"]
 
 [start]
 cmd = "node dist/server.js"
