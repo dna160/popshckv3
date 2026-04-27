@@ -175,6 +175,51 @@ function calcCropBox(
   return { left, top, width: targetW, height: targetH };
 }
 
+// ── Frame loader with white-background guard ──────────────────────────────────
+/**
+ * Load a frame PNG and guarantee it has a proper alpha channel.
+ *
+ * Some frames are accidentally exported as flat RGB (no transparency).
+ * When composited over an article image those frames cover the photo
+ * entirely — producing the "white background" bug.
+ *
+ * If the frame has no alpha channel, this function converts near-white
+ * pixels (R>240 && G>240 && B>240) to fully transparent so the article
+ * image shows through the empty areas correctly.
+ */
+async function loadFrameWithTransparency(framePath: string): Promise<Buffer> {
+  const meta = await sharp(framePath).metadata();
+
+  // Happy path — frame already has alpha, just return it as-is
+  if (meta.hasAlpha) {
+    return sharp(framePath).png().toBuffer();
+  }
+
+  // Frame has no alpha channel → strip white background programmatically
+  const { data, info } = await sharp(framePath)
+    .ensureAlpha()   // add opaque alpha channel (all pixels alpha=255)
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const buf = Buffer.from(data);
+
+  // Walk every pixel; make near-white pixels transparent
+  for (let i = 0; i < buf.length; i += 4) {
+    const r = buf[i];
+    const g = buf[i + 1];
+    const b = buf[i + 2];
+    if (r > 240 && g > 240 && b > 240) {
+      buf[i + 3] = 0; // transparent
+    }
+  }
+
+  return sharp(buf, {
+    raw: { width: info.width, height: info.height, channels: 4 },
+  })
+    .png()
+    .toBuffer();
+}
+
 // ── Main export ───────────────────────────────────────────────────────────────
 
 export interface ProcessImageParams {
@@ -299,8 +344,10 @@ async function renderFormat(params: {
     .png()
     .toBuffer();
 
-  // Resize frame to target dimensions
-  const frame = await sharp(framePath)
+  // Resize frame to target dimensions (loadFrameWithTransparency fixes any
+  // frame that was exported without an alpha channel — e.g. Infotainment Story)
+  const frameBase = await loadFrameWithTransparency(framePath);
+  const frame = await sharp(frameBase)
     .resize(targetW, targetH, { fit: 'fill' })
     .png()
     .toBuffer();
